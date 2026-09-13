@@ -114,6 +114,20 @@ function buildCommands({ voiceEnabled }) {
               { name: 'default', value: 'default' },
             ),
         ),
+      // Voice-only for the same reason join/leave are: there is no speech to
+      // stop on an instance that never speaks. Unlike /wakephrase, /interrupt
+      // and /transcribe this is a MOMENTARY action, not a per-key state
+      // toggle — it takes no option, and a bare invocation is the action, not
+      // a query. The only query-shaped answer it can give is "nothing was
+      // playing", which the action itself reports.
+      //
+      // No live call is required to register it (the command list is built at
+      // startup), but acting on it does require one: the playback it stops
+      // lives on a live Session, so a call that is not up has nothing to
+      // cancel and says so.
+      new SlashCommandBuilder()
+        .setName('cancel')
+        .setDescription('Stop the reply I am currently speaking'),
     );
   }
 

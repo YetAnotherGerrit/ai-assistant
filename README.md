@@ -10,7 +10,7 @@ Discord (cloud)
    |  outbound gateway — no ingress, no tunnel
 discord-assistant  (single Node service, single bot identity)
    |-- text    DM / thread    ------------------> OpenAI-compatible endpoint
-   \-- voice   /join, /leave  -> speech-to-speech -> same endpoint
+   \-- voice   /join, /leave, /cancel  -> speech-to-speech -> same endpoint
 ```
 
 Today that endpoint is MiniMax. Later it is a wrapper around a Claude Code session, and neither surface changes — only `OPENAI_BASE_URL`.
@@ -53,7 +53,7 @@ ALLOWED_USER_IDS=<your-discord-user-id> \
 S2S_MODE=realtime ~/Documents/workspaces/scripts/s2s-minimax
 ```
 
-DM the bot to use text. `/join` from a voice channel to use voice, `/leave` to stop.
+DM the bot to use text. `/join` from a voice channel to use voice, `/leave` to stop. `/cancel` stops the reply currently being spoken without speaking over it — it works whether or not barge-in is enabled, and replies `Nothing is playing right now.` when idle. It stops playback only: the reply is still generated server-side and still reaches the transcript.
 
 To put Claude Code behind it instead of a hosted model, run `make shim` and point `OPENAI_BASE_URL` at it.
 
