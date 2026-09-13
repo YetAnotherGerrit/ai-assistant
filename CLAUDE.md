@@ -55,7 +55,9 @@ npm run shim      # start the Python shim
 
 ## Verifying Voice Changes
 
-The audio path is the part most likely to break silently, and unit tests do not cover it. Any change touching `src/voice.js`, the decode pipeline, or the audio dependencies needs a **real voice session**: join a channel, speak, confirm audio is received and decodes to intelligible PCM. "The process started" is not verification — a broken decode path produces silence or garble while every log line looks healthy.
+The audio path is the part most likely to break silently, and unit tests do not cover it. Any change touching `src/voice.js`, the decode pipeline, the audio dependencies, **or the shim's spoken-output path** (`shim/claude_openai_shim.py` — truncation, fillers, the `_MORE_LINE` tail) needs a **real voice session**: join a channel, speak, confirm audio is received and decodes to intelligible PCM. "The process started" is not verification — a broken decode path produces silence or garble while every log line looks healthy.
+
+**Check the running config before diagnosing spoken output.** The shim reads `~/.config/discord-assistant/config.yaml` (or `$DISCORD_ASSISTANT_CONFIG`) once at startup: `voice.spoken_max: 0` disables truncation outright, so with it set no truncation tail can be spoken and a missing "the details are in…" line is config, not a code regression. A config change needs a shim restart (`launchctl kickstart -k gui/$(id -u)/com.github.bborbe.discord-assistant-shim`), and the value that matters is the one the _running_ process read, not the repo's.
 
 ## Git Workflow
 

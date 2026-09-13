@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 - MINOR version when you add functionality in a backwards-compatible manner, and
 - PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- docs: the `Verifying Voice Changes` section now covers the shim's spoken-output path (`shim/claude_openai_shim.py` — truncation, fillers, the `_MORE_LINE` tail) and says to check the running config before diagnosing spoken output: `voice.spoken_max: 0` in `~/.config/discord-assistant/config.yaml` disables truncation outright, so a missing tail line is config, not a code regression.
+
 ## v0.45.0
 
 - feat: `/cancel` slash command — stops the reply currently being spoken without speaking over the assistant. Unlike the barge-in path it is not gated on `INTERRUPT_RESPONSE`, so it works with barge-in turned off; it stops playback only, so the reply is still generated server-side and still reaches the transcript.
