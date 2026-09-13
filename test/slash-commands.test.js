@@ -16,7 +16,7 @@ const names = (opts) => buildCommands(opts).map((c) => c.name);
 // list so adding a voice command means updating this in exactly one place —
 // `wakephrase` was added here after it shipped as the third member and the old
 // hard-coded `join`/`leave` filter turned it into a text-surface regression.
-const VOICE_ONLY = ['join', 'leave', 'wakephrase', 'interrupt', 'transcribe'];
+const VOICE_ONLY = ['join', 'leave', 'cancel', 'wakephrase', 'interrupt', 'transcribe'];
 
 test('voice enabled advertises the voice commands', () => {
   const n = names({ voiceEnabled: true });
@@ -69,6 +69,17 @@ test('/transcribe advertises the on/off/default choices', () => {
   assert.equal(transcribe.options[0].required, false, 'bare invocation is the query form');
   const choices = transcribe.options[0].choices.map((c) => c.value);
   assert.deepEqual(choices.sort(), ['default', 'off', 'on']);
+});
+
+test('/cancel takes no options — it is a momentary action, not a state toggle', () => {
+  // /wakephrase, /interrupt and /transcribe are all per-key STATE toggles whose
+  // bare invocation is the query form. /cancel is not: it stops the reply being
+  // spoken right now and holds no state to query, so it is shaped like
+  // /join and /leave instead. An option appearing here would mean someone
+  // rebuilt it as a toggle, which is the regression this pins down.
+  const cancel = buildCommands({ voiceEnabled: true }).find((c) => c.name === 'cancel');
+  assert.ok(cancel, '/cancel must be registered');
+  assert.equal(cancel.options.length, 0, '/cancel must take no options');
 });
 
 test('/wakephrase advertises the on/off/default choices', () => {

@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 - MINOR version when you add functionality in a backwards-compatible manner, and
 - PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: `/cancel` slash command — stops the reply currently being spoken without speaking over the assistant. Unlike the barge-in path it is not gated on `INTERRUPT_RESPONSE`, so it works with barge-in turned off; it stops playback only, so the reply is still generated server-side and still reaches the transcript.
+
 ## v0.44.0
 
 - fix: `/mode` drops the `on`/`off`/`default` aliases — its three named states (`voice-only`, `voice-text`, `text-only`) are the whole value space. An `off` was ambiguous on a command that sets a pair of flags (stop posting? stop speaking?), and the default is reachable by naming `voice-text`. The bare query form stays.

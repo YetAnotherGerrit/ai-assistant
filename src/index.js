@@ -198,6 +198,7 @@ client.on('interactionCreate', async (i) => {
   if (
     (i.commandName === 'join' ||
       i.commandName === 'leave' ||
+      i.commandName === 'cancel' ||
       i.commandName === 'wakephrase' ||
       i.commandName === 'interrupt' ||
       i.commandName === 'transcribe') &&
@@ -405,6 +406,37 @@ client.on('interactionCreate', async (i) => {
       content: left ? 'Left.' : 'Not in a voice channel.',
       flags: MessageFlags.Ephemeral,
     });
+  }
+
+  if (i.commandName === 'cancel') {
+    // The typed counterpart to barge-in, for when the listener does not want
+    // to talk over the assistant. Same shape as /leave rather than /interrupt:
+    // it touches only local playback state, so there is no shim round trip and
+    // no deferral to spend.
+    //
+    // Deliberately NOT gated on `config.interruptResponse`, unlike the
+    // `speech_started` path. That switch decides whether SPEAKING cancels a
+    // turn; this is an explicit operator action, and gating it would leave
+    // /cancel unavailable in exactly the case it exists for — barge-in turned
+    // off. This is the only stop path that ignores the switch.
+    const session = voice.sessions.get(i.guildId);
+    if (!session || session.closed) {
+      return i.reply({
+        content: 'Not in a voice channel.',
+        flags: MessageFlags.Ephemeral,
+      });
+    }
+    if (!session.cancelPlayback()) {
+      return i.reply({
+        content: 'Nothing is playing right now.',
+        flags: MessageFlags.Ephemeral,
+      });
+    }
+    log.info('slash command: /cancel — stopping playback', {
+      guildId: i.guildId,
+      user: i.user.tag,
+    });
+    return i.reply({ content: 'Stopped.', flags: MessageFlags.Ephemeral });
   }
 });
 

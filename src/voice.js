@@ -195,6 +195,14 @@ class Session {
     this.outTick = null;
     this.ending = false;
     this.speaking = false;
+    // Set by cancelPlayback() (the /cancel command) and held until the server
+    // finishes the response it cancelled. Without it the cancel is cosmetic:
+    // the server has no "cancel this item" message, so the rest of the reply
+    // keeps arriving, and pushAudio() starts playback again on the next chunk
+    // — the abandoned answer resumes mid-sentence. Barge-in does not need this
+    // because `speech_started` also tells the server to cancel the generation,
+    // so no further chunks come; /cancel sends no such signal.
+    this.cancelled = false;
     this.subscribed = new Set();
     this.closed = false;
     this.ws = null;
@@ -735,6 +743,10 @@ class Session {
       case 'response.created':
         this.inResponse = true;
         this.answering = true;
+        // A fresh turn is never a cancelled one. Defensive, like the resets on
+        // response.done: if the cancelled turn somehow ended without reporting
+        // it, a stuck `cancelled` would silently swallow every later reply.
+        this.cancelled = false;
         this.showTyping();
         break;
       case 'input_audio_buffer.speech_started':
@@ -852,6 +864,10 @@ class Session {
         this.typedReplyPending = false;
         this.inResponse = false;
         this.answering = false;
+        // The cancelled turn is over, so its audio suppression ends here —
+        // otherwise a stuck flag would mute the next reply. Primary clear;
+        // response.created is the backstop.
+        this.cancelled = false;
         // A no-op once audio played (reportStall already cleared it) — this is
         // the backstop for a response that ends without ever producing a frame.
         this.clearStallClock();
@@ -929,6 +945,11 @@ class Session {
         this.typedReplyPending = false;
         this.inResponse = false;
         this.answering = false;
+        // Same reason as the response.done clear: this path exists precisely
+        // because a failed turn emits no response.done, so a cancelled turn
+        // that then failed would otherwise leave the flag stuck and mute every
+        // later reply.
+        this.cancelled = false;
         this.clearStallClock();
         this.endAudio();
         // From inside Discord, a failed answer and an utterance the wake gate
@@ -1065,6 +1086,11 @@ class Session {
     // Gated here rather than at the two call sites: this is the one function
     // both of them reach, so a third caller cannot reintroduce the leak.
     if (this.speechOff) return;
+    // Same reason as the gate in pushAudio(): this is the OTHER path that opens
+    // a playback stream, so a cancelled turn whose stall clock fires would
+    // otherwise re-open the player and speak the filler into a reply the
+    // listener just cancelled.
+    if (this.cancelled) return;
     this.audio = new PassThrough();
     this.ending = false;
     this.speaking = true;
@@ -1098,6 +1124,13 @@ class Session {
    * synthesis pauses playback instead of finishing it.
    */
   pushAudio(chunk) {
+    // A cancelled response keeps synthesising server-side; every further chunk
+    // is discarded here rather than queued. Checked before the queue concat and
+    // before reportStall() so a cancelled turn neither refills the buffer
+    // stopAudio() just cleared nor re-arms the stall clock for audio nobody
+    // will hear. Cleared on response.done / response.created (see below), so
+    // the next genuine reply plays normally.
+    if (this.cancelled) return;
     this.outQueue = Buffer.concat([this.outQueue, up(chunk)]);
 
     // First frame of the turn: the wait is over. Reported BEFORE the guard
@@ -1188,6 +1221,31 @@ class Session {
       this.player.stop(true);
     } catch {}
     this.speaking = false;
+  }
+
+  /**
+   * Stop the reply being spoken and keep it stopped — the /cancel command.
+   *
+   * Deliberately separate from stopAudio() rather than a flag inside it.
+   * stopAudio() means "this playback is over" and has a caller that must NOT
+   * suppress the rest of the turn: barge-in reaches it from `speech_started`,
+   * where the server is cancelling the generation too, and teardown reaches it
+   * on the way out. Folding the flag in would make both of those swallow
+   * audio they are entitled to.
+   *
+   * The suppression is the part that makes cancel real. `stopAudio()` alone
+   * only drops what has already arrived; the response is still being
+   * synthesised, and the next chunk re-opens playback (pushAudio) and resumes
+   * the abandoned answer mid-sentence. `cancelled` is cleared when the server
+   * reports the turn over, so the NEXT reply is unaffected.
+   *
+   * @returns {boolean} whether anything was actually playing.
+   */
+  cancelPlayback() {
+    if (!this.speaking) return false;
+    this.cancelled = true;
+    this.stopAudio();
+    return true;
   }
 
   /**

@@ -92,6 +92,11 @@ test.after(() => {
 // sends are waiting for, have to let that turn first.
 const flush = () => new Promise((r) => setImmediate(r));
 
+// One 20ms frame of the playback queue, mirroring OUT_FRAME in src/voice.js.
+// Used by the /cancel tests to hand pushAudio() a chunk big enough to be
+// observable if it is (wrongly) queued.
+const OUT_FRAME_BYTES = (48000 * 2 * 2 * 20) / 1000;
+
 test('postToChannel drops with no-live-session when sessions is empty', async () => {
   const result = await voice.postToChannel('ARC-L1 Wide Forest Station');
   assert.deepEqual(result, { posted: false, reason: 'no-live-session' });
@@ -233,6 +238,111 @@ test('liveSessionFor returns the session when live and the channel matches', () 
   const session = fakeSession({ channelId: 'chan-1' });
   voice.sessions.set('guild-1', session);
   assert.equal(voice.liveSessionFor('guild-1', 'chan-1'), session);
+});
+
+// /cancel is the ONE stop path that is not gated on config.interruptResponse,
+// so it cannot lean on the server to stop generating the way barge-in does
+// (speech_started carries turn_detection.interrupt_response; a slash command
+// carries nothing). The response keeps arriving, and `stopAudio()` alone only
+// drops what has already landed — the next chunk re-opens playback and the
+// abandoned reply resumes mid-sentence. These four tests pin the suppression
+// that makes the command real, and the clears that keep it from muting the
+// NEXT reply. The player is a stub because the module loads real Discord deps.
+function playbackCtx(t, { speaking = false, cancelled = false } = {}) {
+  const ctx = {
+    speaking,
+    cancelled,
+    audio: null,
+    outQueue: Buffer.alloc(0),
+    outTick: null,
+    ending: false,
+    speechOff: false,
+    stallStartedAt: null,
+    stallDetected: false,
+    player: {
+      stopCalls: 0,
+      playCalls: 0,
+      stop() {
+        this.stopCalls += 1;
+      },
+      play() {
+        this.playCalls += 1;
+      },
+    },
+    // cancelPlayback() calls through to these, so the context has to carry the
+    // real implementations — otherwise the test would be asserting against a
+    // stand-in rather than the code that ships. clearStallClock() is a no-op
+    // here because stallStartedAt is null (nothing is armed).
+    stopAudio: Session.prototype.stopAudio,
+    clearStallClock: Session.prototype.clearStallClock,
+    // Reached by the response.done / response.created handlers. Both are
+    // no-ops on this context (no audio to end, no channel to type in), but they
+    // have to exist for onEvent() to run to the line under test.
+    endAudio: Session.prototype.endAudio,
+    showTyping: Session.prototype.showTyping,
+    // pushAudio() reports the stall measurement before it starts playback.
+    // No-op here: stallStartedAt is null, which is the "no clock armed" state.
+    reportStall: Session.prototype.reportStall,
+  };
+  // pushAudio() arms the pacing interval on the happy path. A real interval
+  // would hold the test process open, so it is cleared however the test ends.
+  t.after(() => clearInterval(ctx.outTick));
+  return ctx;
+}
+
+const onCtx = (ctx, event) => Session.prototype.onEvent.call(ctx, JSON.stringify(event));
+
+test('cancelPlayback is a no-op when nothing is playing', (t) => {
+  const ctx = playbackCtx(t, { speaking: false });
+  assert.equal(Session.prototype.cancelPlayback.call(ctx), false);
+  // Not merely "returned false" — it must not arm the suppression, or a
+  // no-op /cancel would silently swallow the next genuine reply.
+  assert.equal(ctx.cancelled, false);
+});
+
+test('cancelPlayback stops playback and suppresses the rest of the turn', (t) => {
+  const ctx = playbackCtx(t, { speaking: true });
+  assert.equal(Session.prototype.cancelPlayback.call(ctx), true);
+  assert.equal(ctx.speaking, false, 'the flag /cancel reports on is cleared');
+  assert.equal(ctx.cancelled, true, 'the turn is marked suppressed');
+  assert.equal(ctx.player.stopCalls, 1, 'playback was actually stopped');
+});
+
+test('a cancelled turn does not restart playback on the next chunk', (t) => {
+  const ctx = playbackCtx(t, { speaking: true });
+  Session.prototype.cancelPlayback.call(ctx);
+  // A chunk from the same server response, arriving after the cancel.
+  Session.prototype.pushAudio.call(ctx, Buffer.alloc(OUT_FRAME_BYTES, 7));
+  assert.equal(ctx.audio, null, 'no playback stream is re-opened');
+  assert.equal(ctx.player.playCalls, 0, 'the player is never re-started');
+  assert.equal(ctx.outQueue.length, 0, 'the cleared queue is not refilled');
+  assert.equal(ctx.speaking, false, 'the reply does not resume');
+});
+
+test('a cancelled turn does not speak the stall clip', (t) => {
+  const ctx = playbackCtx(t, { speaking: true });
+  Session.prototype.cancelPlayback.call(ctx);
+  Session.prototype.speakStallClip.call(ctx);
+  assert.equal(ctx.audio, null, 'the filler must not re-open playback');
+});
+
+test('a fresh response clears the suppression so the next reply plays', (t) => {
+  const ctx = playbackCtx(t, { speaking: true });
+  Session.prototype.cancelPlayback.call(ctx);
+  assert.equal(ctx.cancelled, true);
+  onCtx(ctx, { type: 'response.done' });
+  assert.equal(ctx.cancelled, false, 'the next reply must not be swallowed');
+  // And the following chunk plays normally again.
+  Session.prototype.pushAudio.call(ctx, Buffer.alloc(OUT_FRAME_BYTES, 7));
+  assert.notEqual(ctx.audio, null, 'playback resumes for the next turn');
+  assert.equal(ctx.player.playCalls, 1, 'the player was re-started');
+});
+
+test('response.created is the backstop clear for a turn that ended silently', (t) => {
+  const ctx = playbackCtx(t, { speaking: true });
+  Session.prototype.cancelPlayback.call(ctx);
+  onCtx(ctx, { type: 'response.created' });
+  assert.equal(ctx.cancelled, false);
 });
 
 test('speak resolves no-socket when the session is closed', async () => {
