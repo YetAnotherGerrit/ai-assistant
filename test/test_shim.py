@@ -1752,3 +1752,28 @@ class FlagClearPaths(unittest.TestCase):
                           {"X-Session-Key": self.KEY, "X-Transcribe": "maybe"})
         self.assertEqual(body["error"]["message"],
                          "bad X-Transcribe: 'maybe' (want on|off|default)")
+
+
+class UtcIsoStamp(unittest.TestCase):
+    """The shim's turn line carries a wall-clock stamp the bot's logs can join on.
+
+    The regression is a silent one. The turn duration was always measured, but
+    on `time.monotonic()`, which shares no origin with the ISO timestamps the
+    bot writes — so a slow voice turn could not be placed on the turn it
+    belonged to. If the stamp's shape drifts (a `+00:00` suffix instead of `Z`,
+    a dropped millisecond field), the join stops matching and every downstream
+    attribution goes quiet rather than wrong, which is the worse failure.
+    """
+
+    def test_stamp_matches_the_shape_the_bot_writes(self):
+        # THE CONTRACT. The bot emits `"ts":"2026-09-16T19:28:55.057Z"`; the
+        # join is a string comparison against exactly this shape.
+        self.assertRegex(shim._utc_iso(),
+                         r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$")
+
+    def test_ask_claude_actually_emits_the_stamp(self):
+        # Pins the WIRING, not just the helper: a stamp that is computed and
+        # never printed correlates nothing.
+        src = _function_source("ask_claude")
+        self.assertIn("began_iso = _utc_iso()", src)
+        self.assertIn("{began_iso} {time.monotonic() - began:.1f}s", src)
