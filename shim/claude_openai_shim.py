@@ -47,6 +47,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections import defaultdict, deque
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Event, Lock, Thread
@@ -2573,6 +2574,18 @@ def drop_process(key: str) -> None:
         proc.close()
 
 
+def _utc_iso() -> str:
+    """Wall-clock UTC stamp, so a shim turn can be joined to the bot's logs.
+
+    Durations here are measured on `time.monotonic()`, which shares no origin
+    with the ISO timestamps the bot writes — so a duration alone cannot be
+    placed on a turn. Stamping the start makes `start + duration` a wall-clock
+    window that the bot's `mic turn start-to-audio` line can be compared
+    against, which is what attributes a slow turn to a stage.
+    """
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
 def ask_claude(key: str, system: str, prompt: str, on_text=None, is_gone=None,
                already_held=False, voice_only=False,
                speech_off=False) -> tuple[str, bool, bool]:
@@ -2589,13 +2602,15 @@ def ask_claude(key: str, system: str, prompt: str, on_text=None, is_gone=None,
     for attempt in (1, 2):
         proc = get_process(key, system)
         began = time.monotonic()
+        began_iso = _utc_iso()
         try:
             out, truncated = proc.ask(prompt, on_text=on_text, is_gone=is_gone,
                                        already_held=already_held,
                                        voice_only=voice_only,
                                        speech_off=speech_off)
             mark_started(key)
-            print(f"  [{key}] {time.monotonic() - began:.1f}s, {len(out)} chars", flush=True)
+            print(f"  [{key}] {began_iso} {time.monotonic() - began:.1f}s, {len(out)} chars",
+                  flush=True)
             return out, truncated, True
         except (RuntimeError, BrokenPipeError, OSError) as e:
             print(f"  [{key}] process failed ({e}), attempt {attempt}", flush=True)
