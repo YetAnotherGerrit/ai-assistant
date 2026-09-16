@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 - MINOR version when you add functionality in a backwards-compatible manner, and
 - PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.45.2
 
 - chore: the shim's per-turn line now carries a wall-clock UTC stamp — `  [voice:…] 2026-09-16T21:40:08.345Z 4.0s, 344 chars`. Its duration is measured on `time.monotonic()`, which shares no origin with the ISO timestamps the bot writes, so the duration existed but could not be placed on a turn; that is what left a stalled turn unattributable to a stage. `start + duration` now brackets the LLM stage against the bot's `mic turn start-to-audio` line, leaving VAD+STT and TTS+transport as the two remainders. A test pins the stamp's shape against the one the bot writes and asserts `ask_claude` actually emits it — a stamp that is computed and never printed correlates nothing.
 
