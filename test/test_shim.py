@@ -15,6 +15,7 @@ import io
 import json
 import os
 import pathlib
+import re
 import sys
 import tempfile
 import time
@@ -1777,3 +1778,27 @@ class UtcIsoStamp(unittest.TestCase):
         src = _function_source("ask_claude")
         self.assertIn("began_iso = _utc_iso()", src)
         self.assertIn("{began_iso} {time.monotonic() - began:.1f}s", src)
+
+
+class HoldMaxBeatsTheBotsStallClip(unittest.TestCase):
+    """The shim's no-tool filler must reach the wire before the bot's own clip.
+
+    Two timers in two processes, both defaulting to 8.0s until 2026-09-17. On a
+    turn where the agent took >8s to emit its first tool_use they fired together
+    and the BOT's clip won the tie, telling the user the assistant was "still
+    getting the audio ready" while the agent was in fact working. Nothing in
+    either file expressed the relationship, so nothing caught the collision —
+    which is what this test exists to prevent recurring.
+    """
+
+    def test_hold_max_lands_before_the_bots_stall_threshold(self):
+        config_js = (pathlib.Path(shim.__file__).resolve().parent.parent
+                     / "src" / "config.js").read_text()
+        m = re.search(r"VOICE_STALL_THRESHOLD_MS\s*\|\|\s*'(\d+)'", config_js)
+        self.assertIsNotNone(
+            m, "bot stall-threshold default not found — did src/config.js move?")
+        bot_seconds = int(m.group(1)) / 1000.0
+        self.assertLess(
+            shim.HOLD_MAX, bot_seconds,
+            f"shim HOLD_MAX ({shim.HOLD_MAX}s) must fire before the bot's stall "
+            f"clip ({bot_seconds}s), or the bot's misleading clip wins the tie")
