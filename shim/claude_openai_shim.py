@@ -1662,9 +1662,17 @@ HOLD_AFTER = setting("SHIM_HOLD_AFTER", "voice.hold_after", 0.5)
 # Well inside speech-to-speech's 20s read timeout, and cheap: an empty SSE delta
 # is a few dozen bytes and produces no speech.
 KEEPALIVE_EVERY = setting("SHIM_KEEPALIVE_EVERY", "voice.keepalive_every", 8.0)
-# Fallback for a turn that is slow WITHOUT using tools. Rare, so the threshold is
-# generous: better to say nothing than to interject into an answer that is coming.
-HOLD_MAX = setting("SHIM_HOLD_MAX", "voice.hold_max", 8.0)
+# Fallback for a turn that is slow WITHOUT using tools. This was 8.0 on the
+# assumption the path is rare — measured live 2026-09-17 it is not: four of six
+# turns on the brogrammers identity reached it, the agent taking >8s to emit its
+# first tool_use. 8.0 also collided exactly with the bot's own
+# `voiceStallThresholdMs` (8000), so both timers fired together and the BOT's won
+# the tie — speaking "still getting the audio ready", which is wrong, because
+# nothing is getting ready; the agent is working. 5.0 puts this filler's audio on
+# the wire ~3s before that clip can fire, so the user hears a true "one moment"
+# instead of a false "starting up". Still above the ~3.8s fast turns, which stay
+# silent as before.
+HOLD_MAX = setting("SHIM_HOLD_MAX", "voice.hold_max", 5.0)
 # One filler covers a 6-15s turn. A vault question can take 30s — measured at
 # 30.4s live — and past about ten seconds silence reads as failure again, which
 # is exactly what the filler existed to prevent. Repeating it keeps the turn
