@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 - MINOR version when you add functionality in a backwards-compatible manner, and
 - PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.45.3
 
 - fix: the shim's no-tool filler now fires at 5.0s instead of 8.0s, so it reaches the wire before the bot's own stall clip. Both timers defaulted to 8.0s in separate processes; on a turn where the agent took >8s to emit its first tool_use they fired together and the BOT's clip won the tie — telling the user the assistant was "still getting the audio ready" while it was in fact working. Measured live 2026-09-17: four of six turns reached the no-tool path, so it is not the rare case the old comment assumed. A test now pins the cross-process invariant — `shim.HOLD_MAX` must stay below the bot's `voiceStallThresholdMs` — which nothing in either file expressed before.
 
