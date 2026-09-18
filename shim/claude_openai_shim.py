@@ -136,6 +136,11 @@ MCP_CONFIG = _expand(setting(
 _script = setting("SHIM_CLAUDE_SCRIPT", "claude_script", "").strip()
 CLAUDE_SCRIPT = _expand(_script) if _script else ""
 TIMEOUT = setting("SHIM_TIMEOUT", "timeout", 300)
+# How much of a dead claude's stderr to keep for the error it raises. Matches
+# the [:400] the legacy path already uses, so a failure reads the same however
+# it was reached — bounded, because this text lands in the reply as well as the
+# log, and generous enough to keep the line that explains the failure.
+_STDERR_TAIL_CHARS = 400
 # Which model Claude Code itself runs. Distinct from SHIM_MODEL above, which is
 # only the name advertised to OpenAI clients. Empty = the CLI's own default.
 #
@@ -1283,12 +1288,39 @@ def _save(data: dict) -> None:
 
 
 def get_session(key: str) -> tuple[str, bool]:
-    """Return (session_id, started) for a key, creating one if needed."""
+    """Return (session_id, started) for a key, creating one if needed.
+
+    `started` picks between `--resume` and `--session-id`, and the two are not
+    interchangeable: re-issuing `--session-id` for an id whose transcript
+    already exists makes claude exit immediately with "Session ID … is already
+    in use". `mark_started` only runs on a turn that SUCCEEDS, so a first turn
+    that timed out leaves a transcript on disk with `started: False` recorded —
+    and every retry after that re-issues `--session-id` and dies. Observed
+    2026-09-18: one bro thread wedged permanently after a 300s timeout, and
+    never recovered, because nothing ever wrote `started: True`.
+
+    The transcript is therefore the authority, not the flag: if the file is
+    there, the session was started, whatever the record says. Correcting it here
+    (rather than only at spawn) also repairs keys already wedged by earlier runs.
+    """
+    # Resolved before the lock: transcript_dir() goes through identity_for(),
+    # and holding the session lock across an unrelated lookup invites a
+    # lock-order bug for no gain.
+    tdir = transcript_dir(key)
     with _sessions_lock:
         data = _load()
         entry = data.get(key)
         if entry:
-            return entry["id"], entry.get("started", False)
+            sid = entry["id"]
+            started = entry.get("started", False)
+            if not started and (tdir / f"{sid}.jsonl").exists():
+                started = True
+                entry["started"] = True
+                _save(data)
+                print(f"  [{key}] session {sid[:8]} has a transcript but was never "
+                      f"marked started — correcting it, so the next spawn resumes "
+                      f"instead of colliding", flush=True)
+            return sid, started
         sid = str(uuid.uuid4())
         data[key] = {"id": sid, "started": False, "created": time.time(), "turns": 0}
         _save(data)
@@ -2184,11 +2216,21 @@ class ClaudeProcess:
         self._pty_main, pty_child = pty.openpty()
         self._proc = subprocess.Popen(
             cmd, cwd=cwd, stdin=subprocess.PIPE, stdout=pty_child,
-            stderr=subprocess.DEVNULL, text=True, bufsize=1,
+            stderr=subprocess.PIPE, text=True, bufsize=1,
         )
         os.close(pty_child)
         self._out = os.fdopen(self._pty_main, "rb", 0)
         self._buf = b""
+        # stderr is kept, not discarded. Claude writes its fatal errors there —
+        # including "Session ID … is already in use", the single line that
+        # explains the whole 2026-09-18 wedge — and sending it to DEVNULL left
+        # "claude process ended" as the only evidence, indistinguishable from an
+        # ordinary one-off crash. Drained on its own thread rather than read once
+        # the process is gone: a pipe holds a fixed buffer, so a reader that only
+        # looks at the end would let a chatty failure block the writer and hang
+        # the very turn it was supposed to report.
+        self._stderr_tail = ""
+        Thread(target=self._drain_stderr, daemon=True).start()
         # cwd logged unconditionally, not only when it differs from the
         # default — the whole point of per-key persona is that this line is
         # what proves a spoken turn was answered by the RIGHT identity, not
@@ -2198,6 +2240,32 @@ class ClaudeProcess:
 
     def alive(self) -> bool:
         return self._proc.poll() is None
+
+    def _drain_stderr(self) -> None:
+        """Keep the tail of stderr, so a failure can say why it failed.
+
+        Bounded rather than accumulated: a process that logs in a loop would
+        otherwise grow this for as long as it runs.
+        """
+        try:
+            for line in self._proc.stderr:
+                self._stderr_tail = (self._stderr_tail + line)[-_STDERR_TAIL_CHARS:]
+        except (ValueError, OSError):
+            pass    # pipe closed under us — nothing left worth keeping
+
+    def stderr_tail(self) -> str:
+        return self._stderr_tail.strip()
+
+    def _ended_reason(self) -> str:
+        """Why the process ended, in claude's own words when it left any.
+
+        The bare sentence is what made the 2026-09-18 failure expensive: the
+        real cause was on a stderr nobody kept, so a permanent wedge and a
+        one-off crash looked identical from the outside, and the retry loop
+        rebuilt the same broken command indefinitely.
+        """
+        tail = self.stderr_tail()
+        return f"claude process ended: {tail}" if tail else "claude process ended"
 
     def interrupt(self) -> None:
         """Abandon the in-flight turn without killing the session.
@@ -2491,7 +2559,7 @@ class ClaudeProcess:
             line = self._readline()
             if line is None:
                 stop_timer()
-                raise RuntimeError("claude process ended")
+                raise RuntimeError(self._ended_reason())
             if not line.strip():
                 continue
             try:
@@ -2549,6 +2617,10 @@ class ClaudeProcess:
             pass
         try:
             self._out.close()
+        except Exception:
+            pass
+        try:
+            self._proc.stderr.close()
         except Exception:
             pass
         try:
