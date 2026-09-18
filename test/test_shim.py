@@ -551,6 +551,83 @@ class AvailableSessions(unittest.TestCase):
         self.assertEqual(entry["label"], "the opening question")
 
 
+class GetSessionStartedFlag(unittest.TestCase):
+    """`started` picks `--resume` vs `--session-id` — and a wrong value is
+    permanent, not transient.
+
+    The regression: `mark_started` runs only on a turn that SUCCEEDS, so a first
+    turn that timed out recorded `started: False` beside a transcript that
+    plainly existed. Every retry then re-issued `--session-id` for an id already
+    on disk, claude exited instantly with "Session ID … is already in use", and
+    the shim rebuilt the same broken command forever. Observed 2026-09-18 on a
+    bro thread that stayed dead for the rest of the day while every other
+    session on the same shim kept working.
+
+    The transcript is the authority: if the file exists, the session was
+    started, whatever the record says.
+    """
+
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self._sessions = pathlib.Path(self._dir.name) / "shim-sessions.json"
+        self._patch_dir = mock.patch.object(
+            shim, "transcript_dir", return_value=pathlib.Path(self._dir.name))
+        self._patch_file = mock.patch.object(shim, "SESSIONS_FILE", self._sessions)
+        self._patch_dir.start()
+        self._patch_file.start()
+
+    def tearDown(self):
+        self._patch_file.stop()
+        self._patch_dir.stop()
+        self._dir.cleanup()
+
+    def _seed(self, key, sid, started):
+        self._sessions.write_text(json.dumps({key: {
+            "id": sid, "started": started, "created": time.time(), "turns": 0}}))
+
+    def _write_transcript(self, sid):
+        (pathlib.Path(self._dir.name) / f"{sid}.jsonl").write_text("{}\n")
+
+    def test_a_transcript_makes_a_not_started_session_started(self):
+        # THE REGRESSION. Fails against the pre-fix version, which returned the
+        # recorded flag and let the retry collide indefinitely.
+        self._seed("thread:1:bro", "eb7c92a5-7d2b-4c43-b982-2f41dfc3ffa4", False)
+        self._write_transcript("eb7c92a5-7d2b-4c43-b982-2f41dfc3ffa4")
+
+        _sid, started = shim.get_session("thread:1:bro")
+        self.assertTrue(started)
+
+    def test_no_transcript_leaves_a_not_started_session_not_started(self):
+        # The other direction: a genuinely fresh session must still be opened
+        # with --session-id, or the first turn would try to resume nothing.
+        self._seed("thread:2:bro", "11111111-1111-1111-1111-111111111111", False)
+
+        _sid, started = shim.get_session("thread:2:bro")
+        self.assertFalse(started)
+
+    def test_the_correction_is_persisted(self):
+        # Not just this call: the flag is written back, so a later turn that
+        # reads the file directly sees the corrected value too.
+        self._seed("thread:3:bro", "22222222-2222-2222-2222-222222222222", False)
+        self._write_transcript("22222222-2222-2222-2222-222222222222")
+        shim.get_session("thread:3:bro")
+
+        on_disk = json.loads(self._sessions.read_text())
+        self.assertTrue(on_disk["thread:3:bro"]["started"])
+
+    def test_a_started_session_keeps_its_id(self):
+        self._seed("thread:4:bro", "33333333-3333-3333-3333-333333333333", True)
+
+        sid, started = shim.get_session("thread:4:bro")
+        self.assertEqual(sid, "33333333-3333-3333-3333-333333333333")
+        self.assertTrue(started)
+
+    def test_a_new_key_still_starts_unstarted(self):
+        sid, started = shim.get_session("thread:5:bro")
+        self.assertFalse(started)
+        self.assertTrue(sid)
+
+
 class ChatBridgePosting(unittest.TestCase):
     """Which URL a bridged answer actually posts to.
 
