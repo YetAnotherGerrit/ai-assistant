@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 - MINOR version when you add functionality in a backwards-compatible manner, and
 - PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.45.4
 
 - fix: a session whose transcript already exists is now treated as started, so a first turn that times out no longer wedges the key into re-issuing `--session-id` against an existing transcript and dying on every retry
 - fix: a dead claude's stderr is kept and reported, so the failure carries the real cause instead of a bare `claude process ended`
