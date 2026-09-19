@@ -1303,16 +1303,20 @@ def get_session(key: str) -> tuple[str, bool]:
     there, the session was started, whatever the record says. Correcting it here
     (rather than only at spawn) also repairs keys already wedged by earlier runs.
     """
+    # Resolved before the lock: transcript_dir() goes through identity_for(),
+    # and holding the session lock across an unrelated lookup invites a
+    # lock-order bug for no gain. Deliberately NOT widened to
+    # session_transcript(): a session bound by `switch` always records
+    # `started: True`, so this correction never fires for one, and widening it
+    # would hold the lock across a glob of every project directory.
+    tdir = transcript_dir(key)
     with _sessions_lock:
         data = _load()
         entry = data.get(key)
         if entry:
             sid = entry["id"]
             started = entry.get("started", False)
-            # session_transcript() rather than transcript_dir(): a session bound
-            # by `switch` may live under another project directory, and a
-            # correction that only looked in this one would miss it.
-            if not started and session_transcript(sid, key) is not None:
+            if not started and (tdir / f"{sid}.jsonl").exists():
                 started = True
                 entry["started"] = True
                 _save(data)
