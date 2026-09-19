@@ -1305,7 +1305,10 @@ def get_session(key: str) -> tuple[str, bool]:
     """
     # Resolved before the lock: transcript_dir() goes through identity_for(),
     # and holding the session lock across an unrelated lookup invites a
-    # lock-order bug for no gain.
+    # lock-order bug for no gain. Deliberately NOT widened to
+    # session_transcript(): a session bound by `switch` always records
+    # `started: True`, so this correction never fires for one, and widening it
+    # would hold the lock across a glob of every project directory.
     tdir = transcript_dir(key)
     with _sessions_lock:
         data = _load()
@@ -1351,6 +1354,59 @@ def transcript_dir(key: str = "") -> Path:
     """
     cwd = identity_for(key)["cwd"] if key else CWD
     return Path.home() / ".claude/projects" / str(Path(cwd).resolve()).replace("/", "-")
+
+
+def session_transcript(sid: str, key: str = "") -> Path | None:
+    """Find a session's transcript anywhere under `~/.claude/projects`.
+
+    `transcript_dir()` resolves ONE project directory from the key's identity
+    cwd. That is the right answer for a session this instance started, and the
+    wrong one for a session started at the DESK under a different cwd — refusing
+    that id reads as "no transcript" while the file sits one directory over.
+    Observed 2026-09-12: `switch be8fae09-…` refused with "no transcript" while
+    the transcript was on disk, written two minutes earlier. The personal
+    identity's cwd had moved to `PersonalAssistant` on 2026-09-03, orphaning
+    every desk transcript from the switch path — 1349 of them, against 6 in the
+    new directory.
+
+    The identity's own directory is checked FIRST: the common case then costs
+    one `stat` and never walks the projects tree.
+    """
+    own = transcript_dir(key) / f"{sid}.jsonl"
+    if own.exists():
+        return own
+    for candidate in (Path.home() / ".claude" / "projects").glob(f"*/{sid}.jsonl"):
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def transcript_cwd(path: Path) -> Path | None:
+    """The working directory a transcript was recorded under.
+
+    Read out of the transcript rather than decoded from the project directory
+    name: the slug replaces every separator with a dash, so a real path
+    containing a dash cannot be decoded back unambiguously.
+
+    The leading entries of a file are headers with no `cwd`; the first record
+    that carries one is authoritative for the whole session.
+    """
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for _ in range(200):
+                line = fh.readline()
+                if not line:
+                    break
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                cwd = entry.get("cwd")
+                if cwd:
+                    return Path(cwd)
+    except OSError:
+        return None
+    return None
 
 
 def available_sessions(key: str = "", limit: int = 200,
@@ -1491,17 +1547,33 @@ def _transcript_has_non_voice_turn(path: Path, start_offset: int) -> tuple[bool,
 def bind_session(key: str, sid: str) -> dict:
     """Point a key at an EXISTING session id. Returns {} on success, else {error}.
 
-    Two refusals, both learned rather than guessed:
+    Three refusals, each naming a DIFFERENT cause — the message is the only
+    thing the human gets mid-call, so "no transcript" must not stand in for a
+    lookup that never looked where the file was:
 
-    - An id with no transcript makes `claude --resume` fail with "No conversation
-      found" on the NEXT turn, long after the bind looked like it worked. Verified
-      2026-08-04 against a freshly generated uuid.
+    - An id with no transcript ANYWHERE makes `claude --resume` fail with "No
+      conversation found" on the NEXT turn, long after the bind looked like it
+      worked. Verified 2026-08-04 against a freshly generated uuid.
+    - A transcript whose owning cwd cannot be read leaves the resume cwd
+      unknown, and fails the same late way.
     - An id already held by another key would put two keys — each with its own
       lock — on one session file at once. Per-key locking is exactly what makes
       concurrent turns safe, and sharing an id defeats it.
+
+    A session started at the desk lives under ITS cwd's project directory, not
+    this identity's. The lookup therefore widens to every project directory, and
+    the record carries the cwd the resume must run under: `claude --resume`
+    resolves the transcript from the cwd it is spawned in, so binding the id
+    without that cwd would pass this gate and fail on the next turn.
     """
-    if not (transcript_dir(key) / f"{sid}.jsonl").exists():
-        return {"error": f"no transcript for {sid} in {transcript_dir(key)}"}
+    path = session_transcript(sid, key)
+    if path is None:
+        return {"error": f"no transcript for {sid} in any project directory under "
+                         f"{Path.home() / '.claude' / 'projects'}"}
+    owner = transcript_cwd(path)
+    if owner is None:
+        return {"error": f"cannot resume {sid}: its transcript at {path} records no "
+                         f"working directory, so the resume cwd is unknown"}
     with _sessions_lock:
         data = _load()
         for k, v in data.items():
@@ -1509,7 +1581,8 @@ def bind_session(key: str, sid: str) -> dict:
                 return {"error": f"{sid} is already bound to {k}"}
         old = data.get(key, {}).get("id", "")
         data[key] = {"id": sid, "started": True, "created": time.time(),
-                     "turns": data.get(key, {}).get("turns", 0), "last": time.time()}
+                     "turns": data.get(key, {}).get("turns", 0), "last": time.time(),
+                     "cwd": str(owner)}
         _save(data)
     drop_process(key)   # the running process still holds the OLD id
     return {"bound": key, "id": sid, "previous": old}
@@ -2258,6 +2331,22 @@ class ClaudeProcess:
         # this instance's one default persona.
         identity = identity_for(key)
         cwd = identity["cwd"]
+        # A session bound by `switch` may have started under a DIFFERENT cwd; the
+        # record carries that cwd so the resume lands where its transcript
+        # actually is. `claude --resume` resolves the transcript from the cwd it
+        # is spawned in, so without this the bind succeeds and the NEXT turn
+        # fails — the late failure `bind_session`'s gate exists to prevent.
+        # The launcher still comes from the identity: it owns model, effort and
+        # the MCP set, while the cwd decides which vault's CLAUDE.md the resumed
+        # conversation continues under — which is what switching asks for.
+        #
+        # Checked for existence: a vault that has since been moved or deleted
+        # would make Popen raise on every turn, which is a worse failure than the
+        # identity's own cwd (where the resume at least reports "no conversation
+        # found" in the transcript's own words).
+        bound_cwd = _load().get(key, {}).get("cwd")
+        if bound_cwd and Path(bound_cwd).is_dir():
+            cwd = bound_cwd
         claude_script = identity["claude_script"]
         mcp_config = identity["mcp_config"]
         allowed_tools = identity["allowed_tools"]

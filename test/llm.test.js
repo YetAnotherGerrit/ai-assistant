@@ -123,6 +123,37 @@ test('switch rejects free text without calling the endpoint', async () => {
   assert.match(reply, /not a session id/);
 });
 
+test('every switch refusal reaches Discord without an absolute path', async () => {
+  // The shim's refusals name their reason, which is what a reader needs — but
+  // each also embeds a host path, and the three put it behind DIFFERENT
+  // prepositions. Stripping only " in /…" left the newer refusals leaking
+  // `/Users/…` into a Discord channel: the widened lookup says "under <dir>",
+  // and a transcript with no recorded cwd says "at <file>".
+  const { switchSession } = require('../src/commands');
+  const realFetch = globalThis.fetch;
+  const refusals = [
+    'no transcript for abc in /Users/me/.claude/projects/-x',
+    'no transcript for abc in any project directory under /Users/me/.claude/projects',
+    'cannot resume abc: its transcript at /Users/me/.claude/projects/-x/abc.jsonl ' +
+      'records no working directory, so the resume cwd is unknown',
+  ];
+  try {
+    for (const message of refusals) {
+      globalThis.fetch = async () => ({
+        ok: false,
+        status: 400,
+        json: async () => ({ error: { message } }),
+      });
+      const reply = await switchSession('k', 'be8fae09-a97e-4c11-a659-cb36975016cc');
+      assert.match(reply, /^Could not switch: /);
+      assert.doesNotMatch(reply, /\/Users\//, `path leaked for: ${message}`);
+      assert.doesNotMatch(reply, /\.claude/, `project dir leaked for: ${message}`);
+    }
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
 test('a channel object missing the type helpers still yields a key', () => {
   // Partial channels are real: a DM arrives uncached, and an older discord.js
   // object may lack isVoiceBased. Optional calls must not throw.
