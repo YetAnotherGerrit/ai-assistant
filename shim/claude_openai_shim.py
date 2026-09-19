@@ -1401,6 +1401,72 @@ def available_sessions(key: str = "", limit: int = 200,
     return out
 
 
+# How often the peer watcher re-reads the transcript. The check is a stat plus a
+# seek to EOF in the common case, so it is cheap enough to run often; the window
+# it leaves is the gap between a peer turn landing on disk and us noticing.
+PEER_WATCH_INTERVAL = 0.2
+
+
+def _transcript_has_non_voice_turn(path: Path, start_offset: int) -> tuple[bool, int]:
+    """Scan transcript bytes past `start_offset` for a turn that is not the user's.
+
+    Returns `(found, new_offset)`.
+
+    WHY THIS EXISTS. Claude Code injects a cross-session message into a running
+    session as its own turn. The shim drives exactly one long-lived `claude`
+    process per session key and reads ONE stream from it, so the injected turn's
+    `text_delta` and `result` events land interleaved with the spoken turn's —
+    and the shim speaks them as the answer to whatever the human just said.
+    Observed 2026-09-13 14:27Z: a peer's nuke-status reply was spoken into a live
+    call in place of the user's open-tasks question, which then arrived late.
+
+    The origin marker is on the USER entry in the transcript and nowhere on the
+    stream: `origin: {kind: "peer", from, name, fromMode}` for a cross-session
+    message, `{kind: "task-notification"}` for an internal notice, and ABSENT for
+    a turn the user actually spoke. `--replay-user-messages` cannot help — it
+    echoes only what the shim itself writes to stdin, and an injected peer turn
+    never passes through stdin.
+
+    Reads only COMPLETE lines, and reports the offset it reached so the caller
+    never re-parses a line it has already judged. A trailing partial line (the
+    writer is mid-append) is left for the next call.
+    """
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return False, start_offset          # no transcript yet — nothing to say
+    if size <= start_offset:
+        return False, start_offset
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            fh.seek(start_offset)
+            data = fh.read()
+    except OSError:
+        return False, start_offset
+
+    consumed = start_offset
+    for raw in data.splitlines(keepends=True):
+        if not raw.endswith("\n"):
+            break                            # partial append; retry next poll
+        consumed += len(raw.encode("utf-8", errors="replace"))
+        try:
+            entry = json.loads(raw)
+        except ValueError:
+            continue
+        if entry.get("type") != "user":
+            continue
+        origin = entry.get("origin")
+        # Any origin at all means the turn was not spoken by the human: `peer`
+        # is a cross-session message, `task-notification` an internal notice. A
+        # spoken turn carries no `origin` key. Unknown future kinds are treated
+        # as non-voice too — that is the safe direction, since the failure this
+        # guards against is speaking traffic the human cannot see.
+        if isinstance(origin, dict) and origin.get("kind"):
+            return True, consumed
+    return False, consumed
+
+
+
 def bind_session(key: str, sid: str) -> dict:
     """Point a key at an EXISTING session id. Returns {} on success, else {error}.
 
@@ -2320,6 +2386,51 @@ class ClaudeProcess:
         actually cut something short (see `push()`), so a caller can tell "the
         full text has more than what was spoken" apart from "this is all of it".
         """
+        # Watch for a turn that is not the human's BEFORE the turn starts, so a
+        # peer message injected while we wait cannot be spoken as this answer.
+        # See `_transcript_has_non_voice_turn` for why the transcript is the
+        # only place this signal exists.
+        peer_stop = Event()
+        peer_seen = Event()
+        peer_seen_since: list[float | None] = [None]
+
+        peer_path = transcript_dir(self._key) / f"{self._session_id}.jsonl"
+
+        def peer_check_now() -> bool:
+            """Synchronous backstop for the watcher's polling window.
+
+            The watcher only notices a peer turn on its next poll, and a fast
+            peer reply could emit a sentence inside that gap. Re-reading the
+            tail at the moment we are about to speak the turn's FIRST sentence
+            closes the window that matters — after that the watcher has had at
+            least one interval to see anything that arrives later.
+            """
+            found, _ = _transcript_has_non_voice_turn(peer_path, 0)
+            if found and not peer_seen.is_set():
+                peer_seen_since[0] = peer_seen_since[0] or time.monotonic()
+                peer_seen.set()
+            return peer_seen.is_set()
+
+        def peer_watch():
+            path = peer_path
+            offset = 0
+            # Bounded by the turn's own deadline: without it a turn that ends
+            # normally leaves the thread stat-ing a transcript forever, and one
+            # leak per turn accumulates across a long-lived call.
+            deadline = time.time() + TIMEOUT
+            while time.time() < deadline and not peer_stop.wait(PEER_WATCH_INTERVAL):
+                found, offset = _transcript_has_non_voice_turn(path, offset)
+                if found:
+                    if peer_seen_since[0] is None:
+                        peer_seen_since[0] = time.monotonic()
+                        print(f"  [{self._key}] non-voice turn appeared in the "
+                              f"transcript — muting the rest of this turn",
+                              flush=True)
+                    peer_seen.set()
+                    return
+
+        Thread(target=peer_watch, daemon=True).start()
+
         msg = {"type": "user",
                "message": {"role": "user", "content": [{"type": "text", "text": prompt}]}}
         self._proc.stdin.write(json.dumps(msg) + "\n")
@@ -2383,6 +2494,28 @@ class ClaudeProcess:
             # deliberate and load-bearing: the chat bridge reads it as "the
             # spoken reply was cut short", and nothing was spoken to cut.
             if speech_off:
+                spoken += 1
+                mark_spoken()
+                return
+            # A turn that is not the human's has appeared in this session — a
+            # cross-session message injected mid-turn, or an internal notice.
+            # Its text is interleaved with the spoken turn's on the ONE stream
+            # we read, and speaking it puts an answer to a conversation the
+            # listener cannot see into their call. Mute the rest of the turn:
+            # the peer's reply is dropped, the human's own answer still arrives
+            # when the turn ends, and the full text still reaches the chat
+            # bridge and the transcript.
+            #
+            # Same bookkeeping as `speech_off` above, for the same reasons —
+            # count it so the progress watcher does not decide we have gone
+            # quiet and interject "still on it" into the silence, and leave
+            # `truncated` False because nothing was spoken to cut short.
+            #
+            # On the turn's FIRST utterance, re-read before deciding: the
+            # watcher may not have polled since a peer turn landed.
+            if first_out:
+                peer_check_now()
+            if peer_seen.is_set():
                 spoken += 1
                 mark_spoken()
                 return
