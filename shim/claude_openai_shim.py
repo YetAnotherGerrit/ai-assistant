@@ -1407,6 +1407,19 @@ def available_sessions(key: str = "", limit: int = 200,
 PEER_WATCH_INTERVAL = 0.2
 
 
+def _transcript_size(path: Path) -> int:
+    """Current byte length of a transcript, or 0 if it is not there yet.
+
+    Used to anchor a turn's scan at the point the turn began, so that only
+    entries written DURING the turn can be judged. See the call site for why
+    starting at 0 is a live outage rather than a conservative default.
+    """
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
 def _transcript_has_non_voice_turn(path: Path, start_offset: int) -> tuple[bool, int]:
     """Scan transcript bytes past `start_offset` for a turn that is not the user's.
 
@@ -2403,7 +2416,19 @@ class ClaudeProcess:
         peer_path = transcript_dir(self._key) / f"{self._session_id}.jsonl"
         # Bytes already judged. Shared between the watcher and the synchronous
         # check so neither re-parses the other's lines.
-        peer_offset = [0]
+        #
+        # Starts at the transcript's CURRENT SIZE, never 0. From 0, the first
+        # scan reads the whole history and trips on any origin entry already in
+        # the file — one `task-notification` from days ago is enough — and
+        # `peer_seen` then mutes EVERY turn for the life of the process.
+        # Observed live 2026-09-19: the assistant went completely silent
+        # mid-call, every turn logging "non-voice turn appeared in the
+        # transcript", because the live transcript held exactly one such entry.
+        #
+        # Only an entry written AFTER this turn starts can be a peer turn
+        # injected into it, which is the only thing this gate exists to catch.
+        # An entry from before the turn is history, not interference.
+        peer_offset = [_transcript_size(peer_path)]
 
         def peer_check_now() -> bool:
             """Synchronous backstop for the watcher's polling window.
