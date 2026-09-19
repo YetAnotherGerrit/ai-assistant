@@ -1960,6 +1960,44 @@ class NonVoiceTurnDetection(unittest.TestCase):
         self.assertFalse(found)
         self.assertEqual(again, offset)
 
+    def test_the_reported_offset_is_a_real_byte_position(self):
+        # Regression, and the sharpest form of it: the offset must be a byte
+        # position in the FILE, not a byte count of whatever fragment the read
+        # happened to return.
+        #
+        # The pre-fix implementation opened the transcript in TEXT mode and
+        # seeked a BYTE offset. The real transcript holds raw UTF-8 — 1942
+        # literal em-dashes in one 1.5 MB session — so the seek snaps to a
+        # character boundary and the fragment is shorter than the bytes it
+        # represents. `consumed` was then accumulated from that fragment, so it
+        # ran PAST the true end of file: measured 1958 returned for a 1954-byte
+        # file. Every later poll then seeked beyond EOF, saw nothing, and the
+        # gate never armed — the reply this function exists to catch gets spoken.
+        #
+        # Asserting the offset (not just the boolean) is what catches this: the
+        # boolean stays True because the peer line parses anyway.
+        long_mb = json.dumps(
+            {"type": "user", "message": {"role": "user", "content": "—" * 600}},
+            ensure_ascii=False) + "\n"
+        self.path.write_text(long_mb, encoding="utf-8")
+        self.assertGreater(len(long_mb.encode()), len(long_mb),
+                           "fixture must actually diverge bytes from characters")
+
+        # Start inside the multibyte line — the case that desynchronises a
+        # text-mode seek.
+        size = self.path.stat().st_size
+        start = size - (size - len(long_mb)) // 2
+        self._write({"type": "user", "origin": {"kind": "peer"},
+                     "message": {"role": "user", "content": "peer"}})
+
+        found, offset = shim._transcript_has_non_voice_turn(self.path, start)
+        self.assertTrue(found)
+        self.assertLessEqual(
+            offset, self.path.stat().st_size,
+            f"offset {offset} must not run past the {self.path.stat().st_size}-byte "
+            f"file — a corrupt offset makes every later poll seek past EOF and "
+            f"miss entries entirely")
+
     def test_a_missing_transcript_is_not_an_error(self):
         # Before the first turn there is no file; the watcher starts anyway.
         found, offset = shim._transcript_has_non_voice_turn(

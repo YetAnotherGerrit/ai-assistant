@@ -1430,6 +1430,14 @@ def _transcript_has_non_voice_turn(path: Path, start_offset: int) -> tuple[bool,
     Reads only COMPLETE lines, and reports the offset it reached so the caller
     never re-parses a line it has already judged. A trailing partial line (the
     writer is mid-append) is left for the next call.
+
+    BYTE offsets, and the file is opened in BINARY mode to match. The transcript
+    holds raw UTF-8 — measured 1942 literal em-dashes in one 1.5 MB session —
+    so a byte offset and a character offset diverge, and `seek()` on a text-mode
+    handle counts CHARACTERS. Seeking a byte offset there lands mid-line, the
+    line fails to parse, and the peer entry is silently missed: the gate never
+    arms and the very reply this function exists to catch gets spoken. Reproduced
+    before the fix: 40 bytes of divergence was enough to lose a peer turn.
     """
     try:
         size = path.stat().st_size
@@ -1438,7 +1446,7 @@ def _transcript_has_non_voice_turn(path: Path, start_offset: int) -> tuple[bool,
     if size <= start_offset:
         return False, start_offset
     try:
-        with path.open("r", encoding="utf-8", errors="replace") as fh:
+        with path.open("rb") as fh:
             fh.seek(start_offset)
             data = fh.read()
     except OSError:
@@ -1446,11 +1454,11 @@ def _transcript_has_non_voice_turn(path: Path, start_offset: int) -> tuple[bool,
 
     consumed = start_offset
     for raw in data.splitlines(keepends=True):
-        if not raw.endswith("\n"):
+        if not raw.endswith(b"\n"):
             break                            # partial append; retry next poll
-        consumed += len(raw.encode("utf-8", errors="replace"))
+        consumed += len(raw)
         try:
-            entry = json.loads(raw)
+            entry = json.loads(raw.decode("utf-8", errors="replace"))
         except ValueError:
             continue
         if entry.get("type") != "user":
@@ -2392,41 +2400,40 @@ class ClaudeProcess:
         # only place this signal exists.
         peer_stop = Event()
         peer_seen = Event()
-        peer_seen_since: list[float | None] = [None]
-
         peer_path = transcript_dir(self._key) / f"{self._session_id}.jsonl"
+        # Bytes already judged. Shared between the watcher and the synchronous
+        # check so neither re-parses the other's lines.
+        peer_offset = [0]
 
         def peer_check_now() -> bool:
             """Synchronous backstop for the watcher's polling window.
 
             The watcher only notices a peer turn on its next poll, and a fast
-            peer reply could emit a sentence inside that gap. Re-reading the
-            tail at the moment we are about to speak the turn's FIRST sentence
-            closes the window that matters — after that the watcher has had at
-            least one interval to see anything that arrives later.
+            peer reply could emit a sentence inside that gap. Re-reading from
+            the last judged offset at the moment we are about to speak the
+            turn's FIRST sentence closes the window that matters — after that
+            the watcher has had at least one interval to see anything that
+            arrives later.
             """
-            found, _ = _transcript_has_non_voice_turn(peer_path, 0)
-            if found and not peer_seen.is_set():
-                peer_seen_since[0] = peer_seen_since[0] or time.monotonic()
+            found, peer_offset[0] = _transcript_has_non_voice_turn(
+                peer_path, peer_offset[0])
+            if found:
                 peer_seen.set()
             return peer_seen.is_set()
 
         def peer_watch():
-            path = peer_path
-            offset = 0
             # Bounded by the turn's own deadline: without it a turn that ends
             # normally leaves the thread stat-ing a transcript forever, and one
             # leak per turn accumulates across a long-lived call.
             deadline = time.time() + TIMEOUT
             while time.time() < deadline and not peer_stop.wait(PEER_WATCH_INTERVAL):
-                found, offset = _transcript_has_non_voice_turn(path, offset)
+                found, peer_offset[0] = _transcript_has_non_voice_turn(
+                    peer_path, peer_offset[0])
                 if found:
-                    if peer_seen_since[0] is None:
-                        peer_seen_since[0] = time.monotonic()
-                        print(f"  [{self._key}] non-voice turn appeared in the "
-                              f"transcript — muting the rest of this turn",
-                              flush=True)
                     peer_seen.set()
+                    print(f"  [{self._key}] non-voice turn appeared in the "
+                          f"transcript — muting the rest of this turn",
+                          flush=True)
                     return
 
         Thread(target=peer_watch, daemon=True).start()
