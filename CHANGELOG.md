@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 - MINOR version when you add functionality in a backwards-compatible manner, and
 - PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.45.6
 
 - fix: the peer-turn gate is now anchored at the point the turn began, so it no longer mutes every turn. v0.45.5 started the transcript scan at byte 0, so the FIRST turn read the whole history and tripped on any origin entry already in the file — one `task-notification` from days earlier was enough — and the gate then muted every turn for the life of the process. Observed live 2026-09-19: the assistant went completely silent mid-call, every turn logging `non-voice turn appeared in the transcript — muting the rest of this turn`. An entry written before the turn is history, not interference; only one written DURING the turn can be a peer message injected into it. Two tests pin it: history must not mute the turn, and a genuine mid-turn injection must still be caught.
 
