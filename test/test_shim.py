@@ -1868,6 +1868,189 @@ class HoldMaxBeatsTheBotsStallClip(unittest.TestCase):
     which is what this test exists to prevent recurring.
     """
 
+class NonVoiceTurnDetection(unittest.TestCase):
+    """A cross-session message injected mid-call must never be spoken.
+
+    Observed 2026-09-13 14:27Z: the assistant spoke a peer's nuke-status reply
+    into a live call in place of the user's open-tasks question, which then
+    arrived late. The shim drives one long-lived `claude` process per session
+    key and reads ONE stream from it, so the injected turn's events interleave
+    with the spoken turn's and the shim speaks them as the answer.
+
+    The origin marker exists only on the USER entry in the transcript:
+    `{kind: "peer"}` for a cross-session message, `{kind: "task-notification"}`
+    for an internal notice, and ABSENT for a turn the human spoke. The stream
+    carries nothing. These pin that reading, because getting it backwards
+    either mutes the call or speaks a stranger's conversation into it.
+    """
+
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._dir.cleanup)
+        self.path = pathlib.Path(self._dir.name) / "session.jsonl"
+
+    def _write(self, *entries, newline=True):
+        with self.path.open("a") as fh:
+            for e in entries:
+                fh.write(json.dumps(e) + ("\n" if newline else ""))
+
+    def _user(self, origin=None, text="hello"):
+        e = {"type": "user", "message": {"role": "user", "content": text}}
+        if origin is not None:
+            e["origin"] = origin
+        return e
+
+    def test_a_peer_turn_is_detected(self):
+        self._write(self._user({"kind": "peer", "from": "uds:/tmp/cc-socks/1.sock",
+                                "name": "Rebuild Nuke Cluster"}))
+        found, _ = shim._transcript_has_non_voice_turn(self.path, 0)
+        self.assertTrue(found, "an injected peer turn must be detected")
+
+    def test_a_spoken_turn_is_not_detected(self):
+        self._write(self._user())
+        found, _ = shim._transcript_has_non_voice_turn(self.path, 0)
+        self.assertFalse(found, "a spoken turn carries no origin and must pass")
+
+    def test_a_task_notification_is_detected(self):
+        # Not a peer, but equally not something the human said — an internal
+        # notice spoken into a call is the same defect with a different source.
+        self._write(self._user({"kind": "task-notification"}))
+        found, _ = shim._transcript_has_non_voice_turn(self.path, 0)
+        self.assertTrue(found)
+
+    def test_an_unknown_origin_kind_is_treated_as_non_voice(self):
+        # The safe direction: a future kind we do not know is more likely to be
+        # machinery than a human, and muting beats speaking traffic the
+        # listener cannot see.
+        self._write(self._user({"kind": "something-new"}))
+        found, _ = shim._transcript_has_non_voice_turn(self.path, 0)
+        self.assertTrue(found)
+
+    def test_assistant_entries_do_not_trip_the_gate(self):
+        # The assistant's OWN entries carry no origin. If they tripped the gate
+        # every turn would mute itself.
+        self._write({"type": "assistant", "message": {"role": "assistant",
+                                                      "content": [{"type": "text", "text": "hi"}]}})
+        found, _ = shim._transcript_has_non_voice_turn(self.path, 0)
+        self.assertFalse(found)
+
+    def test_a_partial_trailing_line_is_left_for_the_next_call(self):
+        # The writer appends while we read, so the last line is routinely
+        # incomplete. Judging it would either crash or mis-read it — so it is
+        # skipped, unconsumed, and picked up once complete.
+        line = json.dumps(self._user({"kind": "peer"}))
+        with self.path.open("a") as fh:
+            fh.write(line[:len(line) // 2])      # half a line, no newline
+        found, offset = shim._transcript_has_non_voice_turn(self.path, 0)
+        self.assertFalse(found, "an incomplete line must not be judged")
+        self.assertEqual(offset, 0, "and must not be consumed")
+        # The writer finishes the line; the same offset now sees it.
+        with self.path.open("a") as fh:
+            fh.write(line[len(line) // 2:] + "\n")
+        found, _ = shim._transcript_has_non_voice_turn(self.path, offset)
+        self.assertTrue(found, "the completed line must be picked up")
+
+    def test_offset_advances_so_lines_are_not_reparsed(self):
+        self._write(self._user(), {"type": "assistant"})
+        found, offset = shim._transcript_has_non_voice_turn(self.path, 0)
+        self.assertFalse(found)
+        self.assertGreater(offset, 0)
+        # Re-reading from the reported offset sees nothing new.
+        found, again = shim._transcript_has_non_voice_turn(self.path, offset)
+        self.assertFalse(found)
+        self.assertEqual(again, offset)
+
+    def test_the_reported_offset_is_a_real_byte_position(self):
+        # Regression, and the sharpest form of it: the offset must be a byte
+        # position in the FILE, not a byte count of whatever fragment the read
+        # happened to return.
+        #
+        # The pre-fix implementation opened the transcript in TEXT mode and
+        # seeked a BYTE offset. The real transcript holds raw UTF-8 — 1942
+        # literal em-dashes in one 1.5 MB session — so the seek snaps to a
+        # character boundary and the fragment is shorter than the bytes it
+        # represents. `consumed` was then accumulated from that fragment, so it
+        # ran PAST the true end of file: measured 1958 returned for a 1954-byte
+        # file. Every later poll then seeked beyond EOF, saw nothing, and the
+        # gate never armed — the reply this function exists to catch gets spoken.
+        #
+        # Asserting the offset (not just the boolean) is what catches this: the
+        # boolean stays True because the peer line parses anyway.
+        long_mb = json.dumps(
+            {"type": "user", "message": {"role": "user", "content": "—" * 600}},
+            ensure_ascii=False) + "\n"
+        self.path.write_text(long_mb, encoding="utf-8")
+        self.assertGreater(len(long_mb.encode()), len(long_mb),
+                           "fixture must actually diverge bytes from characters")
+
+        # Start inside the multibyte line — the case that desynchronises a
+        # text-mode seek.
+        size = self.path.stat().st_size
+        start = size - (size - len(long_mb)) // 2
+        self._write({"type": "user", "origin": {"kind": "peer"},
+                     "message": {"role": "user", "content": "peer"}})
+
+        found, offset = shim._transcript_has_non_voice_turn(self.path, start)
+        self.assertTrue(found)
+        self.assertLessEqual(
+            offset, self.path.stat().st_size,
+            f"offset {offset} must not run past the {self.path.stat().st_size}-byte "
+            f"file — a corrupt offset makes every later poll seek past EOF and "
+            f"miss entries entirely")
+
+    def test_a_missing_transcript_is_not_an_error(self):
+        # Before the first turn there is no file; the watcher starts anyway.
+        found, offset = shim._transcript_has_non_voice_turn(
+            pathlib.Path(self._dir.name) / "nope.jsonl", 0)
+        self.assertFalse(found)
+        self.assertEqual(offset, 0)
+
+
+class PeerTurnGatePrecedesSpeech(unittest.TestCase):
+    """`push()` is the ONE route from model text to the speaker.
+
+    So the gate belongs there and nowhere else — gating at the stream reader
+    would leave the holdish and cap paths unguarded, and gating in the request
+    handler would miss the streamed text entirely. This asserts the guard is
+    present and comes before the first thing that can reach the wire.
+    """
+
+    def test_push_gates_on_a_non_voice_turn(self):
+        src = _function_source("push")
+        self.assertIsNotNone(src, "push() not found — did it move?")
+        self.assertIn("peer_seen.is_set()", src,
+                      "push() must drop text once a non-voice turn is seen")
+        gate = src.index("peer_seen.is_set()")
+        lead_in = src.index("lead_in = part.rstrip()")
+        self.assertLess(gate, lead_in,
+                        "the gate must precede the lead-in path, which also "
+                        "reaches on_text")
+
+    def test_the_first_utterance_rechecks_synchronously(self):
+        # The watcher polls, so a fast peer reply could emit inside its window.
+        # The first utterance must re-read rather than trust the flag.
+        src = _function_source("push")
+        self.assertIn("peer_check_now()", src)
+
+    def test_the_watcher_is_bounded_by_the_turn_deadline(self):
+        # Without a deadline every turn leaks a thread stat-ing a transcript.
+        src = _function_source("ask")
+        self.assertIsNotNone(src)
+        self.assertIn("deadline = time.time() + TIMEOUT", src,
+                      "the peer watcher must not outlive its turn")
+
+
+class HoldMaxBeatsTheBotsStallClip(unittest.TestCase):
+    """The shim's no-tool filler must reach the wire before the bot's own clip.
+
+    Two timers in two processes, both defaulting to 8.0s until 2026-09-17. On a
+    turn where the agent took >8s to emit its first tool_use they fired together
+    and the BOT's clip won the tie, telling the user the assistant was "still
+    getting the audio ready" while the agent was in fact working. Nothing in
+    either file expressed the relationship, so nothing caught the collision —
+    which is what this test exists to prevent recurring.
+    """
+
     def test_hold_max_lands_before_the_bots_stall_threshold(self):
         config_js = (pathlib.Path(shim.__file__).resolve().parent.parent
                      / "src" / "config.js").read_text()

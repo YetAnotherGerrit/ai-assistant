@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 - MINOR version when you add functionality in a backwards-compatible manner, and
 - PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: a cross-session message injected into a live call is no longer spoken as the answer to the human's question. The shim drives one long-lived `claude` process per session key and reads ONE stream from it, so a peer turn injected mid-turn lands interleaved with the spoken turn's events — the peer's reply was voiced, and the human's own answer arrived late, as if replying to whatever was said next. Observed 2026-09-13 14:27Z: a peer's nuke-status reply was spoken into a call in place of the user's open-tasks question. The origin marker exists only on the USER entry in the session transcript (`origin.kind` is `peer` for a cross-session message, `task-notification` for an internal notice, absent for a turn the human spoke) — the stream carries nothing, and `--replay-user-messages` cannot help because it echoes only what the shim writes to stdin. The shim now watches that transcript for the duration of a turn and mutes the rest of the turn when a non-voice turn appears, re-reading synchronously before the turn's first utterance so the watcher's polling window cannot leak text. The muted reply still reaches the chat bridge and the transcript; only the speaker is gated. The transcript is read in binary mode with byte offsets — the real transcript holds raw UTF-8 (1942 literal em-dashes in one 1.5 MB session), and seeking a byte offset on a text-mode handle snaps to a character boundary and accumulates a corrupt offset that runs past the end of the file, after which every poll sees nothing and the gate silently never arms. Caught in review by a test that asserts the offset is a real byte position, not just that detection succeeded.
+
 ## v0.45.4
 
 - fix: a session whose transcript already exists is now treated as started, so a first turn that times out no longer wedges the key into re-issuing `--session-id` against an existing transcript and dying on every retry
