@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 - MINOR version when you add functionality in a backwards-compatible manner, and
 - PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.45.7
 
 - fix: `switch` now finds a session started under a different working directory, and resumes it there. `bind_session` gated on a transcript in the key's OWN project directory — the one `transcript_dir()` derives from the identity's cwd — so an id from anywhere else read as "no transcript" while the file sat one directory over. Observed 2026-09-12: `switch be8fae09-…` refused mid-call against a transcript written two minutes earlier; the personal identity's cwd had moved to `PersonalAssistant` on 2026-09-03, which orphaned 1349 desk transcripts from the switch path against 6 in the new directory. Widening the lookup alone would have been worse than the bug: `claude --resume` resolves the transcript from the cwd it is spawned in, so a bind that merely found the file would pass the gate and fail on the NEXT turn — exactly the late failure the gate exists to prevent. The session record therefore carries the owning cwd — read out of the transcript rather than decoded from the project directory name, since the slug replaces separators with dashes and a real path containing one cannot be decoded back — and the spawn resumes under it. Three refusals now name three different causes: absent everywhere, present but with no readable cwd, and already bound to another key.
 
