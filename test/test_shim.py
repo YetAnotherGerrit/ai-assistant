@@ -1998,6 +1998,33 @@ class NonVoiceTurnDetection(unittest.TestCase):
             f"file — a corrupt offset makes every later poll seek past EOF and "
             f"miss entries entirely")
 
+    def test_history_does_not_mute_the_turn(self):
+        # Regression, live outage 2026-09-19. The scan was anchored at byte 0,
+        # so the FIRST turn read the whole transcript and tripped on an origin
+        # entry already in the file — the live assistant transcript held exactly
+        # one `task-notification`, from days earlier — and `peer_seen` then
+        # muted every turn for the life of the process. The assistant went
+        # completely silent mid-call. An entry written before the turn is
+        # history; only one written DURING it can be injected interference.
+        self._write(self._user({"kind": "task-notification"}))   # already there
+        anchor = self.path.stat().st_size                        # turn starts here
+        self._write(self._user())                                # the spoken turn
+
+        found, _ = shim._transcript_has_non_voice_turn(self.path, anchor)
+        self.assertFalse(found, "an entry from before the turn must not mute it")
+
+    def test_an_entry_written_during_the_turn_still_mutes(self):
+        # The converse: the gate must still fire on a genuine mid-turn
+        # injection, or the fix for the outage would be a mute switch.
+        anchor = shim._transcript_size(self.path)
+        self._write(self._user({"kind": "peer"}))
+        found, _ = shim._transcript_has_non_voice_turn(self.path, anchor)
+        self.assertTrue(found, "a mid-turn injection must still be caught")
+
+    def test_transcript_size_is_zero_when_absent(self):
+        self.assertEqual(
+            shim._transcript_size(pathlib.Path(self._dir.name) / "nope.jsonl"), 0)
+
     def test_a_missing_transcript_is_not_an_error(self):
         # Before the first turn there is no file; the watcher starts anyway.
         found, offset = shim._transcript_has_non_voice_turn(
@@ -2031,6 +2058,14 @@ class PeerTurnGatePrecedesSpeech(unittest.TestCase):
         # The first utterance must re-read rather than trust the flag.
         src = _function_source("push")
         self.assertIn("peer_check_now()", src)
+
+    def test_the_scan_is_anchored_at_turn_start_not_at_zero(self):
+        # Anchoring at 0 reads the whole history on the first turn and mutes
+        # every turn after it. Pinned at the source because the failure is
+        # invisible from the unit under test — it lives in the call site.
+        src = _function_source("ask")
+        self.assertIn("peer_offset = [_transcript_size(peer_path)]", src)
+        self.assertNotIn("peer_offset = [0]", src)
 
     def test_the_watcher_is_bounded_by_the_turn_deadline(self):
         # Without a deadline every turn leaks a thread stat-ing a transcript.
