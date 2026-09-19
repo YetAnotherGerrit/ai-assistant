@@ -133,12 +133,14 @@ Three commands manage them, as slash commands or typed words:
 | Command       | Effect                                                                            |
 | ------------- | --------------------------------------------------------------------------------- |
 | `new`         | Fresh session here. The old one stays on disk and the reply quotes its id         |
-| `sessions`    | What is bound where, plus transcripts you can switch to, labelled by first prompt |
-| `switch <id>` | Point this conversation at an existing session                                    |
+| `sessions`    | What is bound where, plus this cwd's recent transcripts, labelled by first prompt |
+| `switch <id>` | Point this conversation at an existing session, from any working directory        |
 
 Typed in a **voice channel's chat**, all three act on the spoken conversation — so `switch <id>` there picks up a session you started at the desk and lets you continue it by talking.
 
-`switch` refuses two things: an id with no transcript (otherwise `--resume` fails on the _next_ turn, far from the cause), and an id already bound to another key (two keys on one session file defeats per-key locking). It cannot see a session open in an interactive `claude` at the desk, since that is not in the shim's mapping — binding to one puts two writers on a single transcript.
+`switch` refuses three things, each with its own message: an id with no transcript anywhere under `~/.claude/projects` (otherwise `--resume` fails on the _next_ turn, far from the cause), a transcript that records no working directory (the resume cwd would be unknown, failing the same late way), and an id already bound to another key (two keys on one session file defeats per-key locking). It cannot see a session open in an interactive `claude` at the desk, since that is not in the shim's mapping — binding to one puts two writers on a single transcript.
+
+A session started under a **different working directory** is resumed under that directory, so it continues with the `CLAUDE.md` its own history ran under rather than this identity's. That is what makes the line above true for a desk session: `--resume` resolves the transcript from the cwd it is spawned in, so the lookup has to find the file _and_ the spawn has to land where it lives.
 
 Inspect with `status` in Discord, or `curl -s localhost:8080/v1/sessions`. The `id` is an ordinary Claude Code session id: `claude --resume <id>` opens the same conversation at the desk. Resetting is safe only because the session is a cache — the vault is the record.
 

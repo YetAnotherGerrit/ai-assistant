@@ -129,9 +129,12 @@ async function switchSession(key, id) {
     return `This conversation now continues \`${target}\`. Its history is already there — say something to pick it up.`;
   } catch (e) {
     // The shim's refusals name their reason, which is what a reader needs — but
-    // the "no transcript" one carries an absolute path that means nothing in a
-    // chat window and reveals more of the host than a Discord reply should.
-    const why = e.message.replace(/ in \/\S+/, '');
+    // they also carry absolute paths that mean nothing in a chat window and
+    // reveal more of the host than a Discord reply should. Every refusal states
+    // one, each behind a different preposition ("in <dir>" when the lookup
+    // missed, "under <dir>" for the widened search, "at <file>" when a
+    // transcript has no recorded cwd), so strip the path and keep the sentence.
+    const why = e.message.replace(/ (?:in|under|at) \/\S+/g, '');
     return `Could not switch: ${why}`;
   }
 }

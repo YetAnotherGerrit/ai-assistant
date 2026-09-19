@@ -2097,3 +2097,115 @@ class HoldMaxBeatsTheBotsStallClip(unittest.TestCase):
             shim.HOLD_MAX, bot_seconds,
             f"shim HOLD_MAX ({shim.HOLD_MAX}s) must fire before the bot's stall "
             f"clip ({bot_seconds}s), or the bot's misleading clip wins the tie")
+
+
+class CrossCwdSwitch(unittest.TestCase):
+    """`switch` must find a session started under a DIFFERENT working directory.
+
+    Observed 2026-09-12: `switch be8fae09-…` refused mid-call with "no transcript"
+    while the transcript sat on disk, written two minutes earlier. The personal
+    identity's cwd had moved to `PersonalAssistant` on 2026-09-03, so the lookup
+    searched that project directory while 1349 desk transcripts stayed in the
+    previous one.
+
+    Widening the lookup alone is NOT the fix, and these pin both halves. The
+    record must carry the transcript's OWN cwd: `claude --resume` resolves the
+    transcript from the cwd it is spawned in, so a bind that finds the file but
+    resumes in the identity's cwd passes the gate and fails on the NEXT turn —
+    the late failure the gate exists to prevent. A lookup-only fix therefore
+    looks green against the first test below and is still broken in the call.
+    """
+
+    SID = "be8fae09-a97e-4c11-a659-cb36975016cc"
+
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._dir.cleanup)
+        self._home = pathlib.Path(self._dir.name)
+        self._sessions = self._home / "shim-sessions.json"
+        # The identity's own project dir, and a DIFFERENT one holding the session.
+        self._own = self._home / ".claude" / "projects" / "-Users-me-OwnVault"
+        self._desk = self._home / ".claude" / "projects" / "-Users-me-DeskVault"
+        self._own.mkdir(parents=True)
+        self._desk.mkdir(parents=True)
+        for patcher in (
+            mock.patch.object(shim, "transcript_dir", return_value=self._own),
+            mock.patch.object(shim, "SESSIONS_FILE", self._sessions),
+            mock.patch("pathlib.Path.home", return_value=self._home),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _write_desk_transcript(self, cwd="/Users/me/DeskVault"):
+        """A transcript shaped like the real one: a header with no `cwd`, then
+        the first record that carries it."""
+        path = self._desk / f"{self.SID}.jsonl"
+        path.write_text(
+            json.dumps({"type": "summary", "sessionId": self.SID}) + "\n"
+            + json.dumps({"type": "user", "cwd": cwd,
+                          "message": {"role": "user", "content": "hi"}}) + "\n")
+        return path
+
+    def _write_header_only(self):
+        path = self._desk / f"{self.SID}.jsonl"
+        path.write_text(json.dumps({"type": "summary", "sessionId": self.SID}) + "\n")
+        return path
+
+    def test_the_lookup_finds_a_transcript_in_another_project_dir(self):
+        # THE REGRESSION. Fails against the pre-fix version, which searched only
+        # the identity's own directory and reported "no transcript".
+        self._write_desk_transcript()
+        self.assertIsNotNone(shim.session_transcript(self.SID, "voice:1:personal"))
+
+    def test_the_owning_cwd_is_read_from_the_transcript(self):
+        # Not decoded from the directory slug: the slug replaces separators with
+        # dashes, so a real path containing one cannot be decoded back.
+        self._write_desk_transcript()
+        path = shim.session_transcript(self.SID, "voice:1:personal")
+        self.assertEqual(shim.transcript_cwd(path), pathlib.Path("/Users/me/DeskVault"))
+
+    def test_a_header_only_transcript_yields_no_cwd(self):
+        # The file exists but says nothing about where it ran — a third state,
+        # distinct from both "absent" and "found".
+        self.assertIsNone(shim.transcript_cwd(self._write_header_only()))
+
+    def test_bind_records_the_transcripts_cwd_not_the_identitys(self):
+        # The half a lookup-only fix would miss: the bind must remember where to
+        # resume, or the gate passes here and `--resume` fails on the next turn.
+        self._write_desk_transcript()
+        res = shim.bind_session("voice:1:personal", self.SID)
+        self.assertNotIn("error", res)
+        self.assertEqual(
+            json.loads(self._sessions.read_text())["voice:1:personal"]["cwd"],
+            "/Users/me/DeskVault")
+
+    def test_a_transcript_in_the_own_dir_is_still_found(self):
+        (self._own / f"{self.SID}.jsonl").write_text(
+            json.dumps({"type": "user", "cwd": "/Users/me/OwnVault"}) + "\n")
+        res = shim.bind_session("voice:1:personal", self.SID)
+        self.assertNotIn("error", res)
+        self.assertEqual(
+            json.loads(self._sessions.read_text())["voice:1:personal"]["cwd"],
+            "/Users/me/OwnVault")
+
+    def test_an_absent_id_names_absence_not_a_directory(self):
+        # The message is the only thing the human gets mid-call. Pre-fix it named
+        # the single directory searched, which is what made a present transcript
+        # read as a missing one.
+        err = shim.bind_session("voice:1:personal", self.SID)["error"]
+        self.assertIn("any project directory", err)
+
+    def test_a_transcript_with_no_cwd_refuses_distinctly(self):
+        # Three refusals, three messages: "absent" must not be the wording for
+        # "found, but the resume cwd is unknown".
+        self._write_header_only()
+        err = shim.bind_session("voice:1:personal", self.SID)["error"]
+        self.assertIn("cannot resume", err)
+        self.assertNotIn("no transcript", err)
+
+    def test_an_id_bound_to_another_key_still_refuses(self):
+        # The second original refusal must survive the widening.
+        self._write_desk_transcript()
+        shim.bind_session("voice:1:personal", self.SID)
+        err = shim.bind_session("voice:2:personal", self.SID)["error"]
+        self.assertIn("already bound", err)
