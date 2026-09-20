@@ -258,8 +258,8 @@ resolve_secret() {
 }
 
 case "$component" in
-shim | s2s | transcriber | bot) ;;
-*) die_config "usage: launchd-run.sh <shim|s2s|transcriber|bot>" ;;
+shim | s2s | transcriber | bot | gateway) ;;
+*) die_config "usage: launchd-run.sh <shim|s2s|transcriber|bot|gateway>" ;;
 esac
 
 [ -f local.env ] || die_config "local.env missing — cp local.env.example local.env"
@@ -305,6 +305,27 @@ bot | shim | s2s)
     echo "launchd-run[$component]: CHAT_BRIDGE_TOKEN is set as a literal but CHAT_BRIDGE_TOKEN_KEY is not." >&2
     echo "launchd-run[$component]: the literal is IGNORED and the chat bridge is DISABLED — migrate local.env to CHAT_BRIDGE_TOKEN_KEY (see local.env.example)." >&2
   fi
+  ;;
+esac
+
+# The gateway's own secret, and only the gateway's. Per-component isolation
+# applies here as everywhere else: the gateway never holds CHAT_BRIDGE_TOKEN,
+# DISCORD_TOKEN or the shim's key, and no other component holds this one.
+#
+# The same secret necessarily appears in two components — the gateway checks
+# it, and the bot presents it as the ?token= query param on S2S_URL — but they
+# are two independent resolutions of one TeamVault key, not a shared variable,
+# so neither component can observe the other's copy.
+case "$component" in
+gateway)
+  command -v teamvault-cli >/dev/null 2>&1 || die_config "teamvault-cli not on PATH"
+  # die_config, not a warning: the gateway is the ONLY thing standing between
+  # the QUANT network and an unauthenticated voice API. A gateway that starts
+  # without a token is worse than one that does not start at all.
+  [ -n "${S2S_GATEWAY_TOKEN_KEY:-}" ] || die_config "S2S_GATEWAY_TOKEN_KEY unset in local.env — refusing to start an open gateway"
+  resolve_secret "$S2S_GATEWAY_TOKEN_KEY" S2S_GATEWAY_TOKEN_KEY
+  S2S_GATEWAY_TOKEN="$RESOLVED_SECRET"
+  export S2S_GATEWAY_TOKEN
   ;;
 esac
 
@@ -369,8 +390,90 @@ bot)
   resolve_secret "$DISCORD_TOKEN_KEY" DISCORD_TOKEN_KEY
   DISCORD_TOKEN="$RESOLVED_SECRET"
   export DISCORD_TOKEN
+
+  # Append the gateway token to S2S_URL. src/voice.js:469 opens the socket as
+  # `new WebSocket(config.s2sUrl, { maxPayload: 0 })` — no headers option — so
+  # a URL query param is the one auth channel available without editing the
+  # bot's connection code. config.js:70 reads S2S_URL from the environment, so
+  # this is a config change, not a code change.
+  #
+  # Resolved separately from the gateway's copy above (same TeamVault key, two
+  # independent resolutions) so neither component can read the other's.
+  #
+  # die_config when unset, deliberately: falling back to the bare URL would
+  # point the bot at the gateway with no token, which 403s every call — voice
+  # would fail with a connection error that says nothing about the real cause.
+  # Refusing to start states the actual problem.
+  [ -n "${S2S_GATEWAY_TOKEN_KEY:-}" ] || die_config "S2S_GATEWAY_TOKEN_KEY unset in local.env — the bot cannot authenticate to the s2s gateway"
+  resolve_secret "$S2S_GATEWAY_TOKEN_KEY" S2S_GATEWAY_TOKEN_KEY
+  gateway_token="$RESOLVED_SECRET"
+  [ -n "${S2S_URL:-}" ] || die_config "S2S_URL unset in local.env"
+  case "$S2S_URL" in
+  *\?*) S2S_URL="$S2S_URL&token=$gateway_token" ;;
+  *) S2S_URL="$S2S_URL?token=$gateway_token" ;;
+  esac
+  export S2S_URL
+
   # No supervise.sh wrapper: launchd is the supervisor now, and nesting one
   # inside the other would hide the exit code the KeepAlive rule depends on.
   run_server node src/index.js
+  ;;
+
+gateway)
+  # nginx as the authenticating reverse proxy in front of speech-to-speech.
+  # See deploy/nginx/s2s-gateway.conf.template for the why and the config.
+  #
+  # s2s keeps binding 127.0.0.1; this is the ONLY 0.0.0.0 bind in the stack,
+  # and it is token-gated. If this job dies, nothing is exposed.
+  command -v nginx >/dev/null 2>&1 || die_config "nginx not on PATH — brew install nginx"
+
+  template="$PWD/deploy/nginx/s2s-gateway.conf.template"
+  [ -f "$template" ] || die_config "gateway config template missing: $template"
+
+  # The rendered config embeds the token, so it is a runtime artifact and never
+  # a tracked file. ~/.local/share is outside the repo on purpose: anything
+  # written under the checkout risks being committed by a later `git add -A`.
+  runtime_dir="${S2S_GATEWAY_RUNTIME_DIR:-$HOME/.local/share/discord-assistant}"
+  mkdir -p "$runtime_dir" || die_config "cannot create runtime dir $runtime_dir"
+  chmod 700 "$runtime_dir"
+  conf="$runtime_dir/s2s-gateway.conf"
+
+  # envsubst restricted to an explicit variable list, and the template uses the
+  # __NAME__ placeholder form precisely so the substituted names are disjoint
+  # from nginx's own variables. Bare `envsubst` (or a wider list) would also
+  # eat $arg_token / $http_upgrade / $remote_addr and silently render them
+  # empty — producing a gateway that 403s every request, or proxies with no
+  # upgrade headers. The list is the fix; do not widen it casually.
+  #
+  # umask before the redirect so the file is never briefly world-readable.
+  ( umask 077; RUNTIME_DIR="$runtime_dir" S2S_GATEWAY_TOKEN="$S2S_GATEWAY_TOKEN" \
+      envsubst '$RUNTIME_DIR $S2S_GATEWAY_TOKEN' \
+      < "$template" > "$conf" ) || die_config "envsubst failed rendering $conf"
+  chmod 600 "$conf"
+
+  # Fail-closed verification at the source: refuse to start rather than serve a
+  # broken or open proxy. Both checks are needed and neither implies the other.
+  #
+  # grep -F, not a regex — the token is hex but must not be interpreted.
+  if ! grep -qF "$S2S_GATEWAY_TOKEN" "$conf"; then
+    rm -f "$conf"
+    die_config "token absent from rendered config — refusing to start an open gateway"
+  fi
+  # A leftover placeholder means the substitution silently missed, which would
+  # hand nginx a literal "__RUNTIME_DIR__" path and a pid/log path that cannot
+  # be created. Cheap to assert here, obscure to debug from an nginx error.
+  if grep -q '__RUNTIME_DIR__\|__S2S_GATEWAY_TOKEN__' "$conf"; then
+    rm -f "$conf"
+    die_config "unsubstituted placeholder left in rendered config — refusing to start"
+  fi
+
+  # A stale nginx.pid from a hard kill would make the new master refuse to
+  # start ("invalid PID number"); removing it is safe because nothing else
+  # owns this runtime dir.
+  rm -f "$runtime_dir/nginx.pid"
+
+  # No `daemon off` flag here: the template sets it, and passing it in both
+  # places makes nginx warn about a duplicate directive on every start.
+  run_server nginx -c "$conf" -e "$runtime_dir/error.log"
   ;;
 esac

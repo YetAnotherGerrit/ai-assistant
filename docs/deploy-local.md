@@ -8,16 +8,46 @@ For the cluster, see [deploy-kubernetes.md](deploy-kubernetes.md).
 
 ## What actually runs
 
-Four long-lived processes. `make dev` starts all four in one terminal; launchd starts them as four independent jobs.
+Five long-lived processes. `make dev` starts the four app processes in one terminal; launchd starts all five as independent jobs.
 
-| Component        | Port | Started by                           | Needed for                    |
-| ---------------- | ---- | ------------------------------------ | ----------------------------- |
-| shim             | 8080 | `python3 shim/claude_openai_shim.py` | both surfaces                 |
-| speech-to-speech | 8765 | `scripts/s2s-minimax`                | voice only (~60 s model load) |
-| transcriber      | —    | `uv run tools/transcriber.py`        | per-speaker transcripts       |
-| bot              | 8081 | `node src/index.js`                  | both surfaces                 |
+| Component        | Port      | Started by                           | Needed for                    |
+| ---------------- | --------- | ------------------------------------ | ----------------------------- |
+| shim             | 8080      | `python3 shim/claude_openai_shim.py` | both surfaces                 |
+| speech-to-speech | 127.0.0.1:8765 | `scripts/s2s-minimax`           | voice only (~60 s model load) |
+| gateway          | 0.0.0.0:8766 | `nginx -c <rendered conf>`        | voice from off-host clients   |
+| transcriber      | —         | `uv run tools/transcriber.py`        | per-speaker transcripts       |
+| bot              | 8081      | `node src/index.js`                  | both surfaces                 |
 
 The transcriber is easy to forget — it has no port, so nothing fails loudly when it is missing; the transcript file simply stops growing.
+
+## The gateway: the one 0.0.0.0 bind
+
+`s2s` has no incoming-client auth. Its `/v1/realtime` handler accepts immediately, so exposing `8765` on the network exposes an unauthenticated voice API. The `gateway` component is nginx in front of it:
+
+```
+bot  ──ws://127.0.0.1:8766/v1/realtime?token=…──▶  gateway (0.0.0.0:8766)
+                                                       │  403 without a matching token
+                                                       ▼
+                                              s2s (127.0.0.1:8765) — never on 0.0.0.0
+```
+
+**This split is an invariant, not a preference.** The gateway is the only process bound beyond loopback; if it dies, nothing is exposed. Moving `s2s` onto `0.0.0.0` and dropping the gateway would remove the auth boundary entirely — the two are not interchangeable.
+
+The token travels as a `?token=` **query parameter**, not a header, because `src/voice.js:469` opens the socket with no `headers` option. `config.js:70` reads `S2S_URL` from the environment, so this is a config change rather than a code change. `scripts/launchd-run.sh` appends the token to `S2S_URL` at launch for the `bot` component.
+
+### Why `proxy_buffering off`
+
+nginx buffers proxied responses by default. For a voice call that is a silent, total regression: audio is held until the turn completes and then released in one block, so every latency win the streaming pipeline buys is discarded — with no error and no log line. The measured failure mode is 211 deltas held, then 33.6 s dumped at once. `proxy_read_timeout 3600s` is the same class of setting: the 60 s default cuts a live call mid-session during any pause.
+
+### Fail-closed, at three layers
+
+A gateway that starts without a token is worse than one that does not start, so:
+
+1. **The launcher refuses to start** when `S2S_GATEWAY_TOKEN_KEY` is unset. It uses `die_config` (exit 0), so the `KeepAlive/SuccessfulExit=false` rule leaves the job **stopped** rather than respawn-looping.
+2. **The render is verified** before nginx is started — the token must appear in the rendered config, and no unsubstituted placeholder may remain. `envsubst` is restricted to an explicit `$RUNTIME_DIR $S2S_GATEWAY_TOKEN` list; a bare `envsubst` would also consume nginx's own `$arg_token`, `$http_upgrade` and `$remote_addr` and silently render them empty.
+3. **The `map` denies by default.** If the expected token is empty, every request resolves to `deny`, because no real request carries an empty token.
+
+The rendered config embeds the secret, so it is written `0600` to `~/.local/share/discord-assistant/` — a runtime artifact outside the repo. The tracked `deploy/nginx/s2s-gateway.conf.template` holds no secret.
 
 ## Why LaunchAgents, not LaunchDaemons
 
@@ -64,16 +94,17 @@ The plists also set no `WorkingDirectory`: that would make launchd `chdir` into 
 
 ## Layout: one plist per process
 
-Four labels, following the existing house convention:
+Five labels, following the existing house convention:
 
 ```
 com.github.bborbe.discord-assistant-shim
 com.github.bborbe.discord-assistant-s2s
+com.github.bborbe.discord-assistant-gateway
 com.github.bborbe.discord-assistant-transcriber
 com.github.bborbe.discord-assistant-bot
 ```
 
-One job per process, not one job running `dev.sh`. Each restarts on its own, and speech-to-speech's 60-second model load never delays the text surface.
+One job per process, not one job running `dev.sh`. Each restarts on its own, and speech-to-speech's 60-second model load never delays the text surface. The gateway starts in milliseconds — it has no model to load — so voice from an off-host client is reachable long before s2s itself is ready; a client connecting in that window gets a proxy error rather than a hang, which is the honest failure.
 
 Ordering is not expressed and does not need to be: the bot tolerates the shim and s2s being absent, and reconnects when they appear. launchd has no dependency graph for LaunchAgents anyway.
 
@@ -85,6 +116,7 @@ Instead each job runs `scripts/launchd-run.sh <component>`, which sources the gi
 
 - `DISCORD_TOKEN` ← `teamvault-cli password $DISCORD_TOKEN_KEY`
 - `SHIM_FRONT_API_KEY` ← `teamvault-cli password $FRONT_API_KEY_ID`
+- `S2S_GATEWAY_TOKEN` ← `teamvault-cli password $S2S_GATEWAY_TOKEN_KEY` (gateway and bot, each its own resolution)
 
 This is the same contract the `run` and `shim` Makefile targets already use, including `$$( )` rather than `$(shell )` — Make expands `$(shell )` itself and bakes the literal token into the `sh -c` argv, where any process can read it via `ps`.
 
@@ -155,7 +187,7 @@ make install
 make launchd-install
 ```
 
-`launchd-install` generates the four plists from `deploy/launchd/discord-assistant.plist.template` — substituting the component, repo path, home and `PATH` — writes them to `~/Library/LaunchAgents/`, and loads each one. It `bootout`s first, so it is safe to re-run after editing the template.
+`launchd-install` generates the five plists from `deploy/launchd/discord-assistant.plist.template` — substituting the component, repo path, home and `PATH` — writes them to `~/Library/LaunchAgents/`, and loads each one. It `bootout`s first, so it is safe to re-run after editing the template.
 
 The plists are generated rather than committed because each embeds an absolute repo path. The template is the committed artifact.
 
