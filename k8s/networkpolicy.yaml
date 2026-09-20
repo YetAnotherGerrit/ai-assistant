@@ -3,7 +3,18 @@
 # Default-deny in BOTH directions. Allowed egress: DNS, the Discord gateway/API,
 # anything inside the star-citizen namespace, and ONE sanctioned cross-namespace
 # path to the shared Claude router (model access). Allowed ingress: same
-# namespace (bot <-> shim) plus kubelet health probes from the node CIDR.
+# namespace (bot <-> shim), kubelet health probes from the node CIDR, and the
+# cluster's Traefik so the shim's Ingress can reach it (see claude-shim-ing.yaml).
+#
+# ⚠️ The Traefik rule admits the whole kube-system namespace, not one pod: a
+# NetworkPolicy cannot select a Deployment's pods by owner, and Traefik's pods
+# carry no label unique to it. Anything else running in kube-system can
+# therefore also reach the shim — it still needs CHAT_BRIDGE_TOKEN, which is the
+# auth boundary. There is deliberately NO source-address scoping anywhere on this
+# path: Traefik terminates the connection, so it sees an internal address and an
+# ipBlock here would match nothing, and an ipAllowList at the edge cannot
+# distinguish the laptop from any other external host either. The boundary is the
+# network firewall plus that token — see the measurement in claude-shim-ing.yaml.
 #
 # Applies to both pods via the shared label sc.assistant="true" (set on the bot
 # and shim pod templates — one identity, one policy).
@@ -71,3 +82,15 @@ spec:
     # node + pod CIDRs (K3s: pods 10.42.0.0/16, services 10.43.0.0/16).
     - from:
         - ipBlock: { cidr: 10.0.0.0/8 }
+    # Traefik, so the claude-shim Ingress can reach the shim on 8080. Without
+    # this an Ingress routes but the backend refuses the connection (502) —
+    # Traefik runs in kube-system, which neither rule above admits.
+    #
+    # Scoped to the namespace rather than the pod: NetworkPolicy has no
+    # owner-based selector, and Traefik's pods share no distinguishing label.
+    # See the ⚠️ note in the header for what that widens.
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+      ports:
+        - { protocol: TCP, port: 8080 }

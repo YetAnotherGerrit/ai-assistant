@@ -1,0 +1,56 @@
+# Ingress exposing the shim to the laptop over the LAN, via the cluster's Traefik.
+#
+# The route exists for the speech-to-speech loop on the laptop (192.168.20.100):
+# it POSTs a transcribed turn and needs the answer back. The reverse direction
+# (cluster -> laptop audio) is a separate path and does not come through here.
+#
+# Access is NOT scoped here and NOT by the NetworkPolicy. Traefik terminates the
+# connection, so the shim observes an internal address and never the client's —
+# which means no source-address rule at this layer can tell the laptop from any
+# other host (see the annotation comment below for the measurement). The
+# NetworkPolicy's only job here is to admit Traefik itself (see networkpolicy.yaml).
+#
+# The boundary is therefore the network firewall plus the shim's own
+# control-plane token, which authenticates the caller rather than locating it.
+#
+# DNS needs no change: *.nuke.benjamin-borbe.de is a wildcard resolving to the
+# cluster's Traefik address.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: claude-shim
+  namespace: '{{"NAMESPACE" | env}}'
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: 'true'
+    # Deliberately NO ipAllowList middleware. One was written, deployed, and
+    # removed 2026-09-20 after it proved unable to do its job:
+    #
+    #   Traefik sees EVERY external client as 10.42.0.1 — the cluster's own
+    #   ingress gateway — so a source-address allowlist cannot distinguish the
+    #   laptop from any other external host. Measured from the access log
+    #   (`10.42.0.1 - - [...] "GET /v1/models" 403 9`), then confirmed by test:
+    #   allowing 10.42.0.1/32 returns 200. Allowing it admits everything;
+    #   allowing anything narrower admits nobody.
+    #
+    # So the boundary is the network firewall plus the shim's own control-plane
+    # token (CHAT_BRIDGE_TOKEN), which authenticates rather than merely locating
+    # the caller. Do NOT re-add a source-address rule here expecting it to scope
+    # access — it cannot, and it will silently deny the laptop instead.
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: 'claude-shim.{{"ENV_SUFFIX" | env}}.nuke.benjamin-borbe.de'
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: claude-shim
+                port:
+                  name: http
+  tls:
+    - hosts:
+        - 'claude-shim.{{"ENV_SUFFIX" | env}}.nuke.benjamin-borbe.de'
+      secretName: 'tls-nuke-{{"ENV_SUFFIX" | env}}'
