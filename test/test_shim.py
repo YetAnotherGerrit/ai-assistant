@@ -934,21 +934,28 @@ class MoreLine(unittest.TestCase):
 class BargeInSwitch(unittest.TestCase):
     """The barge-in switch: let a turn survive the listener speaking mid-turn.
 
-    Mirrors the voice-only switch — per-key, sticky, default off — because the
-    setting describes THIS conversation, not the whole shim. The failure
-    direction matters: an unknown key must default to cancellation ON (the
-    switch is opt-in per conversation, and nothing may change for everyone
-    else).
+    Mirrors the voice-only switch — per-key, sticky — because the setting
+    describes THIS conversation, not the whole shim. Two levels, and the
+    difference is the whole point of `barge_in_off`: `/interrupt off` writes a
+    per-key override that dies with the process, while the config value is what
+    an un-overridden key falls back to, so a posture survives a restart.
+
+    The built-in default stays cancellation ON. These pin `BARGE_IN_OFF_DEFAULT`
+    explicitly rather than inheriting it, so the suite does not silently change
+    meaning on a machine that happens to export `SHIM_BARGE_IN_OFF`.
     """
 
     KEY = "voice:test"
 
     def setUp(self):
+        self._saved_default = shim.BARGE_IN_OFF_DEFAULT
+        shim.BARGE_IN_OFF_DEFAULT = False
         self._previous = shim.is_barge_in_off(self.KEY)
         shim.set_barge_in_off(self.KEY, False)
 
     def tearDown(self):
         shim.set_barge_in_off(self.KEY, self._previous)
+        shim.BARGE_IN_OFF_DEFAULT = self._saved_default
 
     def test_unknown_key_defaults_to_cancellation_on(self):
         # The load-bearing direction: a key the switch never touched must behave
@@ -974,6 +981,40 @@ class BargeInSwitch(unittest.TestCase):
         self.assertTrue(shim.is_barge_in_off(self.KEY))
         shim.set_barge_in_off(self.KEY, False)
         self.assertFalse(shim.is_barge_in_off(self.KEY))
+
+    def test_the_configured_default_applies_to_a_key_never_toggled(self):
+        # The point of the setting: a room that wants cancellation off gets it
+        # without anyone remembering to run /interrupt after each restart.
+        shim.BARGE_IN_OFF_DEFAULT = True
+        self.assertTrue(shim.is_barge_in_off("voice:never-seen"))
+
+    def test_a_per_key_override_beats_the_configured_default(self):
+        # Both directions, because "the config wins" and "the override wins"
+        # are indistinguishable when only one is tested.
+        shim.BARGE_IN_OFF_DEFAULT = True
+        shim.set_barge_in_off(self.KEY, False)
+        self.assertFalse(shim.is_barge_in_off(self.KEY), "override off must beat default off")
+        shim.BARGE_IN_OFF_DEFAULT = False
+        shim.set_barge_in_off(self.KEY, True)
+        self.assertTrue(shim.is_barge_in_off(self.KEY), "override on must beat default on")
+
+    def test_clearing_an_override_returns_to_the_configured_default(self):
+        # `/interrupt default` is what a caller uses to hand control back, so
+        # it has to land on the configured posture and not on a hardcoded one.
+        shim.BARGE_IN_OFF_DEFAULT = True
+        shim.set_barge_in_off(self.KEY, False)
+        shim.set_barge_in_off(self.KEY, None)
+        self.assertTrue(shim.is_barge_in_off(self.KEY))
+
+    def test_clearing_reports_the_effective_previous_value(self):
+        # The route echoes `previous` back to the operator, so it has to be the
+        # value that was actually in force. With no override set, that is the
+        # configured default — reporting the built-in instead would misstate
+        # what the operator just replaced.
+        shim.BARGE_IN_OFF_DEFAULT = True
+        shim.set_barge_in_off(self.KEY, None)          # drop setUp's override
+        self.assertTrue(shim.set_barge_in_off(self.KEY, None),
+                        "previous must be the effective value, not the built-in")
 
 
 class TranscribeSwitch(unittest.TestCase):

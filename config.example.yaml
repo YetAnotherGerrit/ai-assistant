@@ -55,6 +55,28 @@ transcript_dir: ~/Documents/Obsidian/Personal/60 Periodic Notes/Transcripts
 # Empty disables the relay entirely.
 relay_dir: ~/Documents/Assistant/Personal/relay
 
+# Does speaking while the assistant is answering CANCEL that answer?
+#
+# `false` (the built-in default) keeps today's behaviour: the listener speaking
+# mid-turn ends the in-flight answer, and the reply dies at `0 chars`. `true`
+# lets the turn run to completion, so the full answer still reaches the chat
+# bridge and the transcript.
+#
+# WHY OFF IS THE SAFER SETTING IN A ROOM WITH BACKGROUND SPEECH. The cancel
+# fires on the VAD's `speech_started` — before any words exist — so "okay" and
+# "stop" are the same event and there is nothing to filter on. A child, a TV or
+# a second conversation cancels an answer exactly as effectively as the operator
+# does, and the failure is silent: the person who asked hears nothing. A
+# finished answer that arrived late beats no answer at all.
+#
+# TWO LEVELS. `/interrupt off` in the call's text chat writes a PER-KEY override
+# that lives in memory and is gone the moment the shim restarts — so a room that
+# wants cancellation off has to re-issue the slash command after every restart,
+# and a restart is not something the person in the call can see. This value is
+# the durable level: what an un-overridden conversation falls back to. `/interrupt
+# default` clears an override and returns here.
+barge_in_off: false
+
 # ── per-identity persona (voice) ───────────────────────────────────────────
 # Lets multiple Discord identities share this ONE shim — and the one
 # `speech-to-speech` process every voice call goes through — without
