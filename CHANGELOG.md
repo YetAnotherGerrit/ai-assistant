@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 - MINOR version when you add functionality in a backwards-compatible manner, and
 - PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.47.1
 
 - fix: every spoken turn raised `NameError: name 'relay_msgs' is not defined`, so the bot answered "Language model generation failed" and the assistant was unusable by voice. The relay shipped in v0.46.0 read its inbox in `Handler.do_POST` but claimed it inside `ClaudeProcess.ask` — a different method on a different class — so the name was a free variable where it was used and did not exist. `relay_msgs` is now a parameter threaded through `do_POST` → `ask_claude` → `ask`, and the claim is guarded. **The relay's own tests all passed on the broken build**, because they call `read_relay_inbox` and `claim_relay_messages` directly and never run the method that used them: a unit test of a helper cannot catch a wiring error in its caller. `RelayIsWiredThroughTheTurn` closes that — it asserts the parameter exists on both signatures and that every hop between the read and the claim carries it, and it fails on the pre-fix code with the real symptom (`'relay_msgs=relay_msgs' not found`). Observed live 2026-09-20: nine consecutive "Language model generation failed" posts in a voice channel, every one of them this NameError, and it was misattributed to the operator switching headsets.
 
