@@ -2304,3 +2304,41 @@ class RelayInbox(unittest.TestCase):
         claim_at = src.index("claim_relay_messages(relay_msgs)")
         self.assertLess(write_at, claim_at,
                         "a claim before the write loses the answer on a dead turn")
+
+
+class PathSettingsAreExpanded(unittest.TestCase):
+    """A `~/…` config value must resolve to a real path, not a relative one.
+
+    Every relay test injects a real temp path, so none of them could fail on
+    this — and none did, through the PR review and the release. It surfaced only
+    at deploy, reading the live config: `RELAY_DIR` came back as the literal
+    string `~/Documents/Assistant/Personal/relay`, and `Path("~/x")` names a
+    directory actually called `~` in the cwd, so the inbox would never have been
+    found and the feature would have been silently inert. `TRANSCRIPT_DIR` had
+    the same latent bug, and `config.example.yaml` writes every path as `~/…`.
+
+    The assertion is that resolution agrees with `Path.expanduser()` — the
+    property a real config relies on, stated without pinning a home directory.
+    """
+
+    def test_a_tilde_setting_expands(self):
+        # `setting` returns the RAW value on purpose — the call site expands it.
+        # So the property to pin is the pair: raw keeps the `~`, expanded is real.
+        with mock.patch.dict(os.environ, {"SHIM_RELAY_DIR": "~/relay-probe"}):
+            raw = shim.setting("SHIM_RELAY_DIR", "relay_dir", "")
+        self.assertEqual(raw, "~/relay-probe")
+        self.assertEqual(shim._expand(raw), str(pathlib.Path.home() / "relay-probe"))
+
+    def test_an_unset_path_stays_empty(self):
+        # `Path("").expanduser()` is ".", so expanding unconditionally turns
+        # "unset" into "the cwd" — which is how adding `_expand` to
+        # TRANSCRIPT_DIR armed the transcript directive with a bogus path.
+        self.assertEqual(shim._expand(""), "")
+
+    def test_the_live_settings_are_not_left_relative(self):
+        # The module-level values the process actually uses, not a probe.
+        for name, value in (("TRANSCRIPT_DIR", shim.TRANSCRIPT_DIR),
+                            ("RELAY_DIR", shim.RELAY_DIR)):
+            if value:
+                self.assertFalse(value.startswith("~"), f"{name} left unexpanded: {value}")
+                self.assertTrue(pathlib.Path(value).is_absolute(), f"{name} not absolute")

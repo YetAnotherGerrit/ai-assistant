@@ -120,7 +120,16 @@ def setting(env: str, path: str, default):
 
 
 def _expand(p: str) -> str:
-    return str(Path(p).expanduser())
+    """`~` -> home. An EMPTY string stays empty, deliberately.
+
+    `Path("").expanduser()` returns `"."`, so expanding unconditionally turns
+    "this setting is unset" into "this setting is the current directory" — and
+    several settings use empty as their off switch (`TRANSCRIPT_DIRECTIVE` and
+    `RELAY_DIRECTIVE` are both empty exactly when their dir is). Observed
+    2026-09-20: adding `_expand` to `TRANSCRIPT_DIR` made an unset transcript dir
+    resolve to `.`, which armed the transcript directive with a bogus path.
+    """
+    return str(Path(p).expanduser()) if p else ""
 
 
 HOST = setting("SHIM_HOST", "host", "127.0.0.1")
@@ -1609,7 +1618,12 @@ def reset_session(key: str) -> str:
 # captured correctly, then "can you check the file I posted in the chat?" was
 # answered "I can't see it", because nothing had ever mentioned the file that
 # contained it.
-TRANSCRIPT_DIR = setting("SHIM_TRANSCRIPT_DIR", "transcript_dir", "").strip()
+# `_expand` is not decoration. Every other path setting in this file goes
+# through it, and a config value written as `~/…` — which is how
+# `config.example.yaml` writes every one of them — is otherwise a RELATIVE
+# path: `Path("~/x")` names a directory literally called `~` in the cwd, and the
+# transcript the directive points at would simply not be there.
+TRANSCRIPT_DIR = _expand(setting("SHIM_TRANSCRIPT_DIR", "transcript_dir", "").strip())
 
 # ── peer relay over the filesystem ──────────────────────────────────────────
 # A shim session cannot receive a cross-session message: it registers as
@@ -1630,7 +1644,7 @@ TRANSCRIPT_DIR = setting("SHIM_TRANSCRIPT_DIR", "transcript_dir", "").strip()
 # `mv` is a protocol any session or shell can implement without a client, and a
 # `.done` rename is atomic within one filesystem, so two readers cannot both
 # claim the same reply.
-RELAY_DIR = setting("SHIM_RELAY_DIR", "relay_dir", "").strip()
+RELAY_DIR = _expand(setting("SHIM_RELAY_DIR", "relay_dir", "").strip())
 
 RELAY_DIRECTIVE = (
     f"PEER RELAY. Another Claude session cannot send you a message: your session "
