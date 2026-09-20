@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 - MINOR version when you add functionality in a backwards-compatible manner, and
 - PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.51.0
 
 - feat: expose the claude-shim to the laptop over the LAN so the speech-to-speech loop can POST a turn and get the answer back. The return path had no route at all: the shim was ClusterIP-only and the `sc-assistant` NetworkPolicy admits neither Traefik nor the laptop. Adds an Ingress (`claude-shim.<env>.nuke.benjamin-borbe.de`) plus the NetworkPolicy ingress rule that lets Traefik reach the pod on 8080. Deploy envs gain `ENV_SUFFIX` so one manifest serves both clusters.
 
