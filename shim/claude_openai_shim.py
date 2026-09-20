@@ -1611,6 +1611,119 @@ def reset_session(key: str) -> str:
 # contained it.
 TRANSCRIPT_DIR = setting("SHIM_TRANSCRIPT_DIR", "transcript_dir", "").strip()
 
+# ── peer relay over the filesystem ──────────────────────────────────────────
+# A shim session cannot receive a cross-session message: it registers as
+# `entrypoint: sdk-cli` (the only such session in the fleet, measured
+# 2026-09-20) and every peer send to it fails with a bare "Failed to send".
+# The socket, the process and the registry entry all look healthy, so the
+# failure misdiagnoses itself as a wedged peer — which is exactly what happened
+# in a live call: the assistant said "Asked — it'll come back with a yes or
+# no", the peer answered four times, and the human heard nothing for two hours.
+#
+# The relay is the way round it that does not depend on the harness. Both sides
+# already share a filesystem, and a peer can write a file; so a peer reply is
+# delivered as a FILE rather than as a message. The shim reads whatever landed
+# since the last turn and puts it in front of the model, which is what makes the
+# answer reach the speaker.
+#
+# Deliberately a plain directory of JSON files and not a queue: `mkdir -p` plus
+# `mv` is a protocol any session or shell can implement without a client, and a
+# `.done` rename is atomic within one filesystem, so two readers cannot both
+# claim the same reply.
+RELAY_DIR = setting("SHIM_RELAY_DIR", "relay_dir", "").strip()
+
+RELAY_DIRECTIVE = (
+    f"PEER RELAY. Another Claude session cannot send you a message: your session "
+    f"registers as an sdk-cli entrypoint and every peer send to it fails, so a "
+    f"relay promise made over peer messaging is never kept. Answers come as FILES "
+    f"instead, under {RELAY_DIR}/inbox/.\n"
+    "When you ask another session a question, write the request as "
+    "`<id>.request.json` in that directory, and in your message to the peer say "
+    "plainly that its SendMessage reply will NOT reach you and that it must "
+    "write its answer to `<id>.answer.json` in that same directory instead.\n"
+    "Do not promise to 'come back with' an answer unless you have given the "
+    "peer that path: an answer with nowhere to land is a promise you cannot "
+    "keep, and the human hears silence instead. If a peer answers by message "
+    "anyway, you will never receive it — so never wait on one."
+) if RELAY_DIR else ""
+
+RELAY_MARKER = ".done"
+
+
+def relay_inbox() -> Path:
+    return Path(RELAY_DIR) / "inbox"
+
+
+def read_relay_inbox() -> list[dict]:
+    """Every answer that has landed and not yet been claimed. Never raises.
+
+    Returns dicts with `path` / `sender` / `answer` / `when`, oldest first. A
+    file that does not parse is skipped and LEFT IN PLACE: it is a peer's
+    message, and dropping it silently is the failure this whole path exists to
+    prevent. A half-written file is the same case — it has no `.done` marker.
+    """
+    if not RELAY_DIR:
+        return []
+    try:
+        candidates = sorted(relay_inbox().glob("*.answer.json"))
+    except OSError:
+        return []
+    out: list[dict] = []
+    for path in candidates:
+        try:
+            with path.open(encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict) or not str(data.get("answer", "")).strip():
+            continue
+        out.append({"path": path,
+                    "sender": str(data.get("sender", "a peer session")),
+                    "answer": str(data["answer"]).strip(),
+                    "when": str(data.get("when", ""))})
+    return out
+
+
+def claim_relay_messages(msgs: list[dict]) -> None:
+    """Mark answers as delivered by an atomic rename. Never raises.
+
+    Called AFTER the turn's prompt has been written to the child, not before.
+    Claiming first would mean a turn that dies between the claim and the write
+    loses the peer's answer — which is the exact failure this path exists to
+    fix. The residual risk is the mirror image and much the cheaper one: a crash
+    in the window between a successful write and this rename speaks the answer
+    twice on the next turn. A duplicate is an annoyance; a loss is the bug.
+    """
+    for m in msgs:
+        path = m.get("path")
+        if path is None:
+            continue
+        try:
+            path.replace(path.with_name(path.name + RELAY_MARKER))
+        except OSError:
+            pass                          # another reader took it; fine
+
+
+def relay_prompt_block(msgs: list[dict]) -> str:
+    """The in-context note that makes a landed answer speakable.
+
+    Prefixed to the user's turn rather than injected as its own message: a peer
+    turn is exactly what the mute gate suppresses, so an answer delivered that
+    way would be silenced by the guard that exists to stop peer traffic being
+    spoken as the human's answer.
+    """
+    if not msgs:
+        return ""
+    lines = ["RELAY: a peer session answered a question you asked earlier. "
+             "Say the answer to the user now, as the first thing you say."]
+    for m in msgs:
+        who = m["sender"]
+        when = f" ({m['when']})" if m["when"] else ""
+        lines.append(f"- from {who}{when}: {m['answer']}")
+    return "\n".join(lines) + "\n\n"
+
+
+
 TRANSCRIPT_DIRECTIVE = (
     f"A live transcript of this call is written to {TRANSCRIPT_DIR}, one folder "
     "per channel per day — the most recently modified is this conversation, in "
@@ -2556,6 +2669,9 @@ class ClaudeProcess:
                "message": {"role": "user", "content": [{"type": "text", "text": prompt}]}}
         self._proc.stdin.write(json.dumps(msg) + "\n")
         self._proc.stdin.flush()
+        # Claimed only now that the prompt is genuinely with the child. See
+        # `claim_relay_messages` for why the order is write-then-claim.
+        claim_relay_messages(relay_msgs)
 
         seen: list[str] = []
         pending = ""       # partial text not yet handed to on_text
@@ -3622,6 +3738,17 @@ class Handler(BaseHTTPRequestHandler):
         if voice:
             prompt = chat_mode_context_note(chat_off, chat_off_just_turned_on) + prompt
 
+        # A peer answer that landed since the last turn goes at the very FRONT
+        # of this turn's prompt — AFTER the mode note, which would otherwise be
+        # prepended over it — so the relay instruction is the first thing the
+        # model reads and the answer is what it says first. Read here, claimed
+        # only once the prompt has reached the child; see `claim_relay_messages`.
+        # Voice-only: a text surface has peer messaging of its own, and this
+        # path exists precisely because the voice session's does not work.
+        relay_msgs = read_relay_inbox() if voice else []
+        if relay_msgs:
+            prompt = relay_prompt_block(relay_msgs) + prompt
+
         # The transcript directive is voice-only: it is the record of a call,
         # and a text surface already has its own history in the thread. The
         # chat-bridge directive is replaced by its voice-only inverse when this
@@ -3629,6 +3756,7 @@ class Handler(BaseHTTPRequestHandler):
         parts = [p for p in (system, MEMORY_DIRECTIVE,
                              VOICE_DIRECTIVE if voice else TEXT_DIRECTIVE,
                              TRANSCRIPT_DIRECTIVE if voice else "",
+                             RELAY_DIRECTIVE if voice else "",
                              (CHAT_BRIDGE_VOICE_ONLY_DIRECTIVE
                               if is_chat_off(key) else CHAT_BRIDGE_DIRECTIVE)
                              if (voice and CHAT_BRIDGE_TOKEN) else "") if p]

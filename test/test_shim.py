@@ -2209,3 +2209,98 @@ class CrossCwdSwitch(unittest.TestCase):
         shim.bind_session("voice:1:personal", self.SID)
         err = shim.bind_session("voice:2:personal", self.SID)["error"]
         self.assertIn("already bound", err)
+
+
+
+class RelayInbox(unittest.TestCase):
+    """A peer reply delivered as a file, because a peer message cannot arrive.
+
+    A shim session registers as `entrypoint: sdk-cli` and refuses every
+    cross-session send, so the relay is the delivery path that does not depend
+    on the harness. What these pin is the part that decides whether a human
+    hears the answer: reading does not consume, a malformed answer is not
+    thrown away, claiming is idempotent, and the claim happens only after the
+    turn's prompt has reached the child — because losing a peer's answer is the
+    bug, and the order is what prevents it.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._old = shim.RELAY_DIR
+        shim.RELAY_DIR = self._tmp.name
+        (pathlib.Path(self._tmp.name) / "inbox").mkdir()
+
+    def tearDown(self):
+        shim.RELAY_DIR = self._old
+        self._tmp.cleanup()
+
+    def _answer(self, name, payload):
+        p = pathlib.Path(self._tmp.name) / "inbox" / name
+        p.write_text(json.dumps(payload), encoding="utf-8")
+        return p
+
+    def test_reading_does_not_consume(self):
+        # The whole point of splitting read from claim: a turn that dies before
+        # its prompt reaches the child must not have eaten the answer.
+        self._answer("a.answer.json", {"sender": "Fleet Manager", "answer": "Yes."})
+        self.assertEqual(len(shim.read_relay_inbox()), 1)
+        self.assertEqual(len(shim.read_relay_inbox()), 1, "read must not claim")
+
+    def test_claiming_consumes_exactly_once(self):
+        self._answer("a.answer.json", {"sender": "Fleet Manager", "answer": "Yes."})
+        msgs = shim.read_relay_inbox()
+        shim.claim_relay_messages(msgs)
+        self.assertEqual(shim.read_relay_inbox(), [])
+
+    def test_claiming_twice_is_harmless(self):
+        self._answer("a.answer.json", {"sender": "p", "answer": "x"})
+        msgs = shim.read_relay_inbox()
+        shim.claim_relay_messages(msgs)
+        shim.claim_relay_messages(msgs)          # must not raise
+        self.assertEqual(shim.read_relay_inbox(), [])
+
+    def test_a_malformed_answer_is_left_for_a_later_read(self):
+        # Deleting a peer's message because it did not parse is the failure this
+        # path exists to prevent, so the file stays and the reader moves on.
+        bad = pathlib.Path(self._tmp.name) / "inbox" / "bad.answer.json"
+        bad.write_text("{not json", encoding="utf-8")
+        self._answer("good.answer.json", {"sender": "peer", "answer": "ok"})
+        got = shim.read_relay_inbox()
+        self.assertEqual([m["answer"] for m in got], ["ok"])
+        self.assertTrue(bad.exists(), "an unparseable answer must not be consumed")
+
+    def test_an_empty_answer_is_not_spoken(self):
+        self._answer("e.answer.json", {"sender": "peer", "answer": "   "})
+        self.assertEqual(shim.read_relay_inbox(), [])
+
+    def test_answers_are_read_oldest_first(self):
+        self._answer("b.answer.json", {"sender": "peer", "answer": "second"})
+        self._answer("a.answer.json", {"sender": "peer", "answer": "first"})
+        got = shim.read_relay_inbox()
+        self.assertEqual([m["answer"] for m in got], ["first", "second"])
+
+    def test_no_relay_dir_configured_is_silent(self):
+        shim.RELAY_DIR = ""
+        self.assertEqual(shim.read_relay_inbox(), [])
+        self.assertEqual(shim.relay_prompt_block([]), "")
+        shim.claim_relay_messages([])            # must not raise
+
+    def test_a_landed_answer_asks_to_be_spoken(self):
+        block = shim.relay_prompt_block(
+            [{"sender": "Fleet Manager", "answer": "Yes for topics.", "when": "17:02Z"}])
+        # The instruction has to be on the turn, not implied: the model is being
+        # asked to open with something it did not ask for this turn.
+        self.assertIn("Say the answer to the user now", block)
+        self.assertIn("Fleet Manager", block)
+        self.assertIn("Yes for topics.", block)
+        self.assertTrue(block.endswith("\n\n"), "must not run into the user's turn")
+
+    def test_the_claim_comes_after_the_write(self):
+        # Order is the guarantee, and there is no seam to exercise it through:
+        # assert on the source, which is the honest way to pin "this call is
+        # after that one" without standing up a child process.
+        src = pathlib.Path(shim.__file__).read_text()
+        write_at = src.index('self._proc.stdin.write(json.dumps(msg) + "\\n")')
+        claim_at = src.index("claim_relay_messages(relay_msgs)")
+        self.assertLess(write_at, claim_at,
+                        "a claim before the write loses the answer on a dead turn")
