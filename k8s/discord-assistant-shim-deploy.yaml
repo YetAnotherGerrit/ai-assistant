@@ -98,6 +98,13 @@ spec:
             - name: ANTHROPIC_API_KEY
               valueFrom:
                 secretKeyRef: { name: discord-assistant, key: ROUTER_API_KEY }
+            # The control-plane token this container CHECKS on every mutating
+            # route. Same secret key and same name as the bot's copy above —
+            # one value, two sides, which is the only arrangement the
+            # fail-closed check tolerates.
+            - name: CHAT_BRIDGE_TOKEN
+              valueFrom:
+                secretKeyRef: { name: discord-assistant, key: CHAT_BRIDGE_TOKEN }
             # The filesystem the assistant reaches: the SC vault only.
             - name: SHIM_CWD
               value: /vault

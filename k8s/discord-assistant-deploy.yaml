@@ -46,6 +46,15 @@ spec:
             - name: ADMIN_USER_IDS
               valueFrom:
                 secretKeyRef: { name: discord-assistant, key: ADMIN_USER_IDS }
+            # The shim's control-plane token. Since the authenticated control
+            # plane shipped, every mutating shim route requires it, and the check
+            # is fail-closed: absent or mismatched, the route refuses rather than
+            # degrading. Read by BOTH sides under this SAME name — src/config.js
+            # and claude_openai_shim.py — so a value present on one side only
+            # looks like "the feature does nothing", not like a config error.
+            - name: CHAT_BRIDGE_TOKEN
+              valueFrom:
+                secretKeyRef: { name: discord-assistant, key: CHAT_BRIDGE_TOKEN }
             - name: IDENTITY
               value: sc
             - name: OPENAI_BASE_URL
