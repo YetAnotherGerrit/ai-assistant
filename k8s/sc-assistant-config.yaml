@@ -4,8 +4,18 @@
 # (default ~/.config/discord-assistant/config.yaml). The sc identity is the
 # pod's persona: cwd = the vault, bare `claude` (no launcher script — the pod
 # has no laptop launcher), a tight tool allowlist, and an EMPTY MCP config so
-# `--strict-mcp-config` passes with zero servers (in-cluster semantic-search is
-# a follow-up; the vault is small enough for Read/Edit/Grep/Glob + vault-cli).
+# `--strict-mcp-config` passes with zero servers.
+#
+# The empty MCP config is deliberate, not an unfinished placeholder. The laptop
+# twin reaches semantic search at http://127.0.0.1:8321/mcp?scope=starcitzen and
+# nothing in-cluster answers that: no semantic-search Deployment or Service runs
+# on nuke-dev or nuke-prod, `bborbe/semantic-search` publishes no image, and it
+# is a PyTorch/sentence-transformers service whose model cache and index do not
+# fit this pod's 1Gi limit under a read-only rootfs (verified 2026-09-20).
+# Standing it up is its own task — [[Stand up Semantic Search In-Cluster for the
+# SC Shim]]. Do not "fix" this by pointing mcp_config at a URL: an empty config
+# fails loudly and immediately, while a config pointing at something that never
+# answers fails as a turn timeout that reads like a model problem.
 #
 # NOTE: no claude_script on purpose. A launcher owns --add-dir/model/effort and
 # would reference laptop paths; the pod runs bare `claude` bounded by
@@ -21,13 +31,42 @@ data:
       sc:
         cwd: /vault
         mcp_config: /home/node/mcp-empty.json
-        # No Bash(vault-cli:*): vault-cli is NOT installed in the image
-        # (verified in-pod 2026-08-31), so granting it only widens the
-        # allowlist for a binary that cannot run. Re-add together with the
-        # install if the pod ever needs vault CRUD.
-        allowed_tools: Read,Edit,Write,Glob,Grep,Bash(date:*),Bash(shasum:*),Bash(ls:*),Bash(gh api:*),Bash(gh pr view:*),Bash(git ls-remote:*)
+        # Per-identity `allowed_tools` REPLACES the shim default, it does not
+        # extend it — so this list must stay complete on its own.
+        #
+        # `Bash(vault-cli:*)` was withheld until 2026-09-20 because the binary
+        # was not in the image; granting it then would only have widened the
+        # allowlist for something that could not run. The install landed with
+        # the grant (see the Dockerfile), so the two are no longer separable.
+        #
+        # The semantic-search MCP tools are deliberately absent: there is no
+        # in-cluster server to answer them (see the note at the top of this
+        # file). They arrive with [[Stand up Semantic Search In-Cluster for the
+        # SC Shim]], not before.
+        allowed_tools: Read,Edit,Write,Glob,Grep,Bash(date:*),Bash(shasum:*),Bash(ls:*),Bash(gh api:*),Bash(gh pr view:*),Bash(git ls-remote:*),Bash(vault-cli:*)
   mcp-empty.json: |
     {"mcpServers": {}}
+  # vault-cli's own config. Without it the binary has no vault to resolve:
+  # `vault-cli task list` needs a name->path mapping, and the laptop's
+  # ~/.config/vault-cli/config.yaml points at /Users/bborbe/... paths that do
+  # not exist here. Only the fields the pod can honour are carried over —
+  # claude_script and session_project_dir are laptop paths and are dropped, and
+  # notification.brokers is omitted so the pod never dials the laptop's Kafka.
+  #
+  # Dir names come from the StarCitizen vault, which uses its own layout
+  # (23 Goals / 24 Tasks), not Personal's (24 Goals / 25 Tasks).
+  vault-cli.yaml: |
+    current_user: sc-assistant
+    default_vault: starcitzen
+    vaults:
+      starcitzen:
+        name: starcitzen
+        path: /vault
+        tasks_dir: 24 Tasks
+        goals_dir: 23 Goals
+        daily_dir: 60 Periodic Notes/Daily
+        knowledge_dir: 50 Knowledge Base
+        excludes: ['90 Templates', '.claude', '.obsidian']
   vault-sync.sh: |
     #!/bin/sh
     # obsidian-git equivalent for the pod: keep /vault current (pull) and push

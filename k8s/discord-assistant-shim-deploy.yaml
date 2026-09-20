@@ -134,6 +134,16 @@ spec:
               mountPath: /home/node/mcp-empty.json
               subPath: mcp-empty.json
               readOnly: true
+            # vault-cli's config (vault name -> /vault), at the XDG path the
+            # binary reads by default. Read-only on purpose: vault-cli writes to
+            # the vault, never to its own config, and a pod that could rewrite
+            # its vault mapping would be able to leave /vault silently.
+            # Same subPath caveat as mcp-empty.json above — the parent dir is
+            # created root-owned, which is fine for a file only ever read.
+            - name: sc-assistant-config
+              mountPath: /home/node/.config/vault-cli/config.yaml
+              subPath: vault-cli.yaml
+              readOnly: true
             # claude CLI scratch (EROFS without a writable /tmp).
             - name: tmp
               mountPath: /tmp
