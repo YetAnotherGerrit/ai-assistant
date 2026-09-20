@@ -70,7 +70,7 @@ clean-local:
 
 # --- launchd (macOS local deployment) — see docs/deploy-local.md -------------
 
-LAUNCHD_COMPONENTS = shim s2s transcriber bot
+LAUNCHD_COMPONENTS = shim s2s transcriber bot gateway
 LAUNCHD_DIR        = $(HOME)/Library/LaunchAgents
 # Everything instance-specific derives from LAUNCHD_LABEL, so a second identity
 # installs BESIDE the first rather than on top of it:
@@ -101,7 +101,7 @@ LAUNCHD_PATH       = $(HOME)/.local/bin:/opt/homebrew/bin:$(HOME)/.pyenv/shims:/
 LAUNCHD_LAUNCHER   = $(HOME)/.local/bin/$(LAUNCHD_INSTANCE)-launchd
 
 .PHONY: launchd-install
-# Deploy the launcher outside the repo, generate the four plists, load them
+# Deploy the launcher outside the repo, generate the five plists, load them
 launchd-install: require-config
 	@mkdir -p $(LAUNCHD_DIR) $(LAUNCHD_LOGDIR) $(dir $(LAUNCHD_LAUNCHER))
 	@cp scripts/launchd-run.sh $(LAUNCHD_LAUNCHER)
@@ -129,7 +129,7 @@ launchd-install: require-config
 	@echo "run 'make launchd-status' to check, and see docs/deploy-local.md"
 
 .PHONY: launchd-uninstall
-# Unload the four agents and remove their plists
+# Unload the five agents and remove their plists
 launchd-uninstall:
 	@for c in $(LAUNCHD_COMPONENTS); do \
 	  launchctl bootout gui/$$(id -u)/$(LAUNCHD_LABEL)-$$c 2>/dev/null || true; \
