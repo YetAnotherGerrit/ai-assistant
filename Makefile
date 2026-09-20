@@ -102,8 +102,17 @@ LAUNCHD_LAUNCHER   = $(HOME)/.local/bin/$(LAUNCHD_INSTANCE)-launchd
 
 .PHONY: launchd-install
 # Deploy the launcher outside the repo, generate the five plists, load them
+#
+# The log directory and files are owner-only (0700/0600), not the umask default.
+# s2s logs the full request URL of every accepted websocket, and since the s2s
+# gateway authenticates with a ?token= query param, that puts the gateway token
+# in s2s.log in cleartext. Measured 2026-09-20: 6 occurrences, in a file that was
+# mode 0644 — readable by any local user. The mode is what keeps it contained
+# until the token stops travelling in the URL at all; do not relax it.
 launchd-install: require-config
-	@mkdir -p $(LAUNCHD_DIR) $(LAUNCHD_LOGDIR) $(dir $(LAUNCHD_LAUNCHER))
+	@umask 077; mkdir -p $(LAUNCHD_DIR) $(LAUNCHD_LOGDIR) $(dir $(LAUNCHD_LAUNCHER))
+	@chmod 700 $(LAUNCHD_LOGDIR)
+	@chmod 600 $(LAUNCHD_LOGDIR)/*.log 2>/dev/null || true
 	@cp scripts/launchd-run.sh $(LAUNCHD_LAUNCHER)
 	@chmod +x $(LAUNCHD_LAUNCHER)
 	@echo "  launcher -> $(LAUNCHD_LAUNCHER)"
