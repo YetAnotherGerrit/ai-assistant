@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 - MINOR version when you add functionality in a backwards-compatible manner, and
 - PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.46.0
 
 - feat: a peer session's answer can now reach a voice call as a FILE, because a peer message cannot reach it at all. A shim session registers as `entrypoint: sdk-cli` — the only such session in a 28-session fleet, measured 2026-09-20 — and every `SendMessage` to it fails with a bare "Failed to send" while its socket, its process and its registry entry all read healthy; the socket even accepts a raw write. The failure therefore misdiagnoses itself as a wedged peer, and did: in a live call the assistant said "Asked — it'll come back with a yes or no", the peer answered four times, and the human heard nothing for two hours. Both sides already share a filesystem, so `relay_dir` gives a peer somewhere to write: the shim claims every `<relay_dir>/inbox/*.answer.json` at the next turn and puts it at the FRONT of that turn's prompt, which is what makes the answer speakable — prefixed to the user's turn rather than injected as its own message, since a peer turn is exactly what the mute gate suppresses. Claiming is an atomic rename to `*.answer.json.done`, so two readers cannot both take one reply; an unparseable file is left in place rather than deleted, because silently dropping a peer's message is the failure this path exists to prevent. The assistant is told the inbox path and that a relay promise with nowhere for the answer to land is one it cannot keep. Voice-only, like the transcript directive, and inert when `relay_dir` is empty.
 
