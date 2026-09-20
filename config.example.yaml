@@ -38,6 +38,23 @@ sessions_file: ~/.claude/shim-sessions.json
 # Told to the assistant so it knows the call is being written down, and where.
 transcript_dir: ~/Documents/Obsidian/Personal/60 Periodic Notes/Transcripts
 
+# Where a peer session's reply to a relay question is dropped, so the answer
+# reaches the speaker as a FILE instead of as a message.
+#
+# WHY: a shim session registers as `entrypoint: sdk-cli`, and every peer send to
+# it fails with a bare "Failed to send" while its socket, process and registry
+# entry all look healthy — so the failure reads as a wedged peer. Observed live
+# 2026-09-20: the assistant promised to relay a question, the peer answered four
+# times, and the human heard nothing for two hours.
+#
+# Both sides already share a filesystem, so the reply is written to
+# `<relay_dir>/inbox/<id>.answer.json` and the shim claims it at the next turn,
+# putting it at the front of the prompt so the model answers with it. A claimed
+# file is renamed to `*.answer.json.done`; an unparseable one is left in place,
+# because silently dropping a peer's message is the failure this path prevents.
+# Empty disables the relay entirely.
+relay_dir: ~/Documents/Assistant/Personal/relay
+
 # ── per-identity persona (voice) ───────────────────────────────────────────
 # Lets multiple Discord identities share this ONE shim — and the one
 # `speech-to-speech` process every voice call goes through — without
