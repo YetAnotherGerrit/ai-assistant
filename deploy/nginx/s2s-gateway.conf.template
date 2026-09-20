@@ -1,0 +1,108 @@
+# Authenticating reverse proxy in front of speech-to-speech.
+#
+# s2s has no incoming-client auth of its own — verified 2026-09-20 by reading
+# create_app() in src/speech_to_speech/api/openai_realtime/websocket_router.py:
+# it takes only pool, stop_event, llm_proxy_config — no auth parameter, no
+# middleware. Five routes are exposed unauthenticated (/v1/realtime, /v1/usage,
+# /v1/pool, POST /v1/realtime/calls, DELETE /v1/realtime/calls/{id}), and
+# RealtimeServerArguments.host's own help text says "Pass 0.0.0.0 explicitly to
+# expose the unauthenticated API on the network". Upstream's own llm_proxy.py
+# docstring names the sanctioned fix: "designed to run on a trusted network or
+# behind a gateway that owns access control." This file is that gateway.
+#
+# ARCHITECTURE INVARIANT: this process is the ONLY 0.0.0.0 bind. s2s itself
+# stays on 127.0.0.1 forever. If the gateway dies, nothing is exposed — that
+# is the point of the split, not an accident. Do not "simplify" this by moving
+# s2s onto 0.0.0.0 and deleting this file.
+#
+# Rendered by scripts/launchd-run.sh (component `gateway`) with envsubst, from
+# the token resolved out of TeamVault at launch. The rendered copy lives in the
+# runtime dir with mode 0600 and is NEVER committed — this template is the
+# tracked artifact, and it holds no secret.
+#
+# $RUNTIME_DIR and $S2S_GATEWAY_TOKEN are substituted at launch.
+# nginx's own variables ($arg_token, $http_upgrade, $remote_addr, ...) are NOT
+# substituted: envsubst is restricted to that exact variable list, so they
+# survive rendering intact. Widening that list silently breaks the config.
+
+worker_processes 1;
+daemon off;
+pid $RUNTIME_DIR/nginx.pid;
+error_log $RUNTIME_DIR/error.log warn;
+
+events {
+    worker_connections 256;
+}
+
+http {
+    default_type application/octet-stream;
+
+    # Log format that deliberately omits the query string.
+    #
+    # nginx's default combined format logs $request, which is the full request
+    # line INCLUDING ?token=… — so every voice connection would write the
+    # gateway token to access.log in cleartext. The file is 0600, but a secret
+    # in a log is still leaked: logs get tailed, copied, pasted into issues and
+    # shipped to collectors, and none of that respects the original mode.
+    #
+    # $uri is the path with the query string stripped, which is all this log
+    # actually needs — 403 vs 101 is the signal, not which token was presented.
+    log_format s2s_gateway '$remote_addr - [$time_local] "$request_method $uri '
+                           '$server_protocol" $status $body_bytes_sent';
+    access_log $RUNTIME_DIR/access.log s2s_gateway;
+
+    # Token check. $arg_token is nginx's variable for the `token` query
+    # parameter.
+    #
+    # Fail-closed by construction: if the expected token renders empty, this map
+    # resolves to "deny" for every request, because no real request carries an
+    # empty token. A gateway that lost its secret goes dark; it does not fall
+    # open. (The launcher also refuses to start without a token, so this is the
+    # second layer, not the only one.)
+    map $arg_token $s2s_authorized {
+        default                  deny;
+        "$S2S_GATEWAY_TOKEN"  allow;
+    }
+
+    server {
+        # The ONLY 0.0.0.0 bind in this stack.
+        listen 0.0.0.0:8766;
+        server_name _;
+
+        # 403 rather than 401: this gateway has no auth scheme a client could
+        # negotiate, so advertising WWW-Authenticate would be a lie. The token
+        # is a URL query param, not a challenge-response.
+        if ($s2s_authorized = deny) {
+            return 403;
+        }
+
+        location / {
+            # s2s stays loopback-only. This is the whole point of the split.
+            proxy_pass http://127.0.0.1:8765;
+            proxy_http_version 1.1;
+
+            # The websocket handshake. Without these two the upgrade never
+            # completes and the bot's socket dies at connect.
+            proxy_set_header Upgrade    $http_upgrade;
+            proxy_set_header Connection "upgrade";
+
+            # Default is 60s, which cuts a live voice call mid-session during
+            # any pause longer than a minute.
+            proxy_read_timeout 3600s;
+            proxy_send_timeout 3600s;
+
+            # Streaming must survive the proxy. nginx buffers proxied responses
+            # by default; with buffering on, audio is held and released in
+            # blocks instead of flowing as it is produced — which silently
+            # discards every upstream latency win. Measured failure mode:
+            # 211 deltas held, then 33.6s dumped at once.
+            proxy_buffering off;
+            proxy_request_buffering off;
+
+            proxy_set_header Host              $host;
+            proxy_set_header X-Real-IP         $remote_addr;
+            proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+    }
+}

@@ -2615,7 +2615,8 @@ class ClaudeProcess:
                 return line
 
     def ask(self, prompt: str, on_text=None, is_gone=None,
-            already_held=False, voice_only=False, speech_off=False) -> tuple[str, bool]:
+            already_held=False, voice_only=False, speech_off=False,
+            relay_msgs=None) -> tuple[str, bool]:
         """Run one turn. `on_text` receives assistant text as it arrives.
 
         The `assistant` event carries the reply BEFORE `result` — measured 6.1s
@@ -2696,7 +2697,17 @@ class ClaudeProcess:
         self._proc.stdin.flush()
         # Claimed only now that the prompt is genuinely with the child. See
         # `claim_relay_messages` for why the order is write-then-claim.
-        claim_relay_messages(relay_msgs)
+        #
+        # `relay_msgs` arrives as a PARAMETER, not as a free name: the read
+        # happens in `Handler.do_POST`, a different method on a different class,
+        # so a bare `relay_msgs` here is a NameError at the first voice turn.
+        # That is exactly what shipped in v0.46.1 — every spoken turn raised
+        # `NameError: name 'relay_msgs' is not defined` and the bot answered
+        # "Language model generation failed" nine times in a row. The unit tests
+        # passed because they called `read_relay_inbox` / `claim_relay_messages`
+        # directly and never ran this method.
+        if relay_msgs:
+            claim_relay_messages(relay_msgs)
 
         seen: list[str] = []
         pending = ""       # partial text not yet handed to on_text
@@ -3063,7 +3074,7 @@ def _utc_iso() -> str:
 
 def ask_claude(key: str, system: str, prompt: str, on_text=None, is_gone=None,
                already_held=False, voice_only=False,
-               speech_off=False) -> tuple[str, bool, bool]:
+               speech_off=False, relay_msgs=None) -> tuple[str, bool, bool]:
     """Ask over the persistent process, respawning once if it has died.
 
     Returns `(text, truncated, ok)`. `ok` is False on every error/timeout
@@ -3082,7 +3093,8 @@ def ask_claude(key: str, system: str, prompt: str, on_text=None, is_gone=None,
             out, truncated = proc.ask(prompt, on_text=on_text, is_gone=is_gone,
                                        already_held=already_held,
                                        voice_only=voice_only,
-                                       speech_off=speech_off)
+                                       speech_off=speech_off,
+                                       relay_msgs=relay_msgs)
             mark_started(key)
             print(f"  [{key}] {began_iso} {time.monotonic() - began:.1f}s, {len(out)} chars",
                   flush=True)
@@ -3914,7 +3926,7 @@ class Handler(BaseHTTPRequestHandler):
                     is_gone=(lambda: peer_hung_up(self.connection)) if live else None,
                     already_held=pre_spoken,
                     voice_only=chat_off,
-                    speech_off=speech_off)
+                    speech_off=speech_off, relay_msgs=relay_msgs)
         finally:
             stop_keepalive.set()
 
