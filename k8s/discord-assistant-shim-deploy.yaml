@@ -98,6 +98,13 @@ spec:
             - name: ANTHROPIC_API_KEY
               valueFrom:
                 secretKeyRef: { name: discord-assistant, key: ROUTER_API_KEY }
+            # The control-plane token this container CHECKS on every mutating
+            # route. Same secret key and same name as the bot's copy above —
+            # one value, two sides, which is the only arrangement the
+            # fail-closed check tolerates.
+            - name: CHAT_BRIDGE_TOKEN
+              valueFrom:
+                secretKeyRef: { name: discord-assistant, key: CHAT_BRIDGE_TOKEN }
             # The filesystem the assistant reaches: the SC vault only.
             - name: SHIM_CWD
               value: /vault
@@ -133,6 +140,16 @@ spec:
             - name: sc-assistant-config
               mountPath: /home/node/mcp-empty.json
               subPath: mcp-empty.json
+              readOnly: true
+            # vault-cli's config (vault name -> /vault), at the XDG path the
+            # binary reads by default. Read-only on purpose: vault-cli writes to
+            # the vault, never to its own config, and a pod that could rewrite
+            # its vault mapping would be able to leave /vault silently.
+            # Same subPath caveat as mcp-empty.json above — the parent dir is
+            # created root-owned, which is fine for a file only ever read.
+            - name: sc-assistant-config
+              mountPath: /home/node/.config/vault-cli/config.yaml
+              subPath: vault-cli.yaml
               readOnly: true
             # claude CLI scratch (EROFS without a writable /tmp).
             - name: tmp

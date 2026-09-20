@@ -10,13 +10,13 @@ For the cluster, see [deploy-kubernetes.md](deploy-kubernetes.md).
 
 Five long-lived processes. `make dev` starts the four app processes in one terminal; launchd starts all five as independent jobs.
 
-| Component        | Port      | Started by                           | Needed for                    |
-| ---------------- | --------- | ------------------------------------ | ----------------------------- |
-| shim             | 8080      | `python3 shim/claude_openai_shim.py` | both surfaces                 |
-| speech-to-speech | 127.0.0.1:8765 | `scripts/s2s-minimax`           | voice only (~60 s model load) |
-| gateway          | 0.0.0.0:8766 | `nginx -c <rendered conf>`        | voice from off-host clients   |
-| transcriber      | —         | `uv run tools/transcriber.py`        | per-speaker transcripts       |
-| bot              | 8081      | `node src/index.js`                  | both surfaces                 |
+| Component        | Port           | Started by                           | Needed for                    |
+| ---------------- | -------------- | ------------------------------------ | ----------------------------- |
+| shim             | 8080           | `python3 shim/claude_openai_shim.py` | both surfaces                 |
+| speech-to-speech | 127.0.0.1:8765 | `scripts/s2s-minimax`                | voice only (~60 s model load) |
+| gateway          | 0.0.0.0:8766   | `nginx -c <rendered conf>`           | voice from off-host clients   |
+| transcriber      | —              | `uv run tools/transcriber.py`        | per-speaker transcripts       |
+| bot              | 8081           | `node src/index.js`                  | both surfaces                 |
 
 The transcriber is easy to forget — it has no port, so nothing fails loudly when it is missing; the transcript file simply stops growing.
 

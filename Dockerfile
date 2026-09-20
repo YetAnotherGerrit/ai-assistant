@@ -33,9 +33,32 @@ COPY shim/ ./shim/
 # the bot Deployment runs ENTRYPOINT below, the shim Deployment overrides the
 # command to `python3 -u shim/claude_openai_shim.py`.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends python3 python3-yaml git openssh-client \
+ && apt-get install -y --no-install-recommends python3 python3-yaml git openssh-client curl ca-certificates \
  && rm -rf /var/lib/apt/lists/* \
  && npm install -g @anthropic-ai/claude-code
+
+# vault-cli — the assistant's vault CRUD surface; the `sc` identity's allowlist
+# grants `Bash(vault-cli:*)`. Taken from the published release tarball rather
+# than `go install`: the runtime image carries no Go toolchain, and a static
+# binary is what the pod actually execs at runtime.
+#
+# Checksum-verified against the same release's checksums.txt so a truncated or
+# substituted download fails the BUILD, not the first turn that calls the tool —
+# a broken binary that only fails at call time looks like an allowlist problem
+# and sends the reader to the wrong file. `--version` at the end is the smoke
+# test: it proves the extracted binary runs on this base image, which `tar`
+# succeeding does not.
+ARG VAULT_CLI_VERSION=v0.140.0
+RUN set -eu; \
+    base="https://github.com/bborbe/vault-cli/releases/download/${VAULT_CLI_VERSION}"; \
+    cd /tmp; \
+    curl -fsSL -O "${base}/vault-cli_linux_amd64.tar.gz"; \
+    curl -fsSL -O "${base}/checksums.txt"; \
+    grep ' vault-cli_linux_amd64.tar.gz$' checksums.txt | sha256sum -c -; \
+    tar -xzf vault-cli_linux_amd64.tar.gz -C /usr/local/bin vault-cli; \
+    chmod 0755 /usr/local/bin/vault-cli; \
+    rm -f /tmp/vault-cli_linux_amd64.tar.gz /tmp/checksums.txt; \
+    vault-cli --version
 
 ENV NODE_ENV=production
 ENV BUILD_GIT_VERSION=${BUILD_GIT_VERSION}
