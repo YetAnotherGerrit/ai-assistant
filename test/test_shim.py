@@ -2342,3 +2342,49 @@ class PathSettingsAreExpanded(unittest.TestCase):
             if value:
                 self.assertFalse(value.startswith("~"), f"{name} left unexpanded: {value}")
                 self.assertTrue(pathlib.Path(value).is_absolute(), f"{name} not absolute")
+
+
+class RelayIsWiredThroughTheTurn(unittest.TestCase):
+    """The relay read and the relay claim must be in the same scope.
+
+    v0.46.1 shipped with the claim reading a bare `relay_msgs` inside
+    `ClaudeProcess.ask`, while the name was assigned in `Handler.do_POST` — a
+    different method on a different class. Every spoken turn then raised
+    `NameError: name 'relay_msgs' is not defined`, and the bot answered
+    "Language model generation failed" nine times in a row to a live call.
+
+    The relay unit tests all passed, because they call `read_relay_inbox` and
+    `claim_relay_messages` directly and never run this method. That is the gap
+    these pin: the name has to be a PARAMETER of `ask`, and every hop between
+    the read and the claim has to carry it.
+    """
+
+    def test_ask_takes_relay_msgs_as_a_parameter(self):
+        tree = ast.parse(pathlib.Path(shim.__file__).read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "ask":
+                params = [a.arg for a in node.args.args] + \
+                         [a.arg for a in node.args.kwonlyargs]
+                self.assertIn("relay_msgs", params,
+                              "a free `relay_msgs` in ask() is a NameError at the first turn")
+                return
+        self.fail("ClaudeProcess.ask not found")
+
+    def test_every_hop_carries_relay_msgs(self):
+        # do_POST reads it -> ask_claude forwards it -> proc.ask claims it.
+        # Any hop dropping it silently disables the relay with no error at all.
+        src = pathlib.Path(shim.__file__).read_text()
+        self.assertIn("relay_msgs=relay_msgs", src,
+                      "ask_claude must forward relay_msgs to proc.ask")
+        self.assertGreaterEqual(src.count("relay_msgs"), 5,
+                                "read, block, parameter, forward and call must all name it")
+
+    def test_ask_claude_accepts_it(self):
+        tree = ast.parse(pathlib.Path(shim.__file__).read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "ask_claude":
+                params = [a.arg for a in node.args.args] + \
+                         [a.arg for a in node.args.kwonlyargs]
+                self.assertIn("relay_msgs", params)
+                return
+        self.fail("ask_claude not found")
