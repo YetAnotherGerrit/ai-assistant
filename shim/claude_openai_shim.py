@@ -875,18 +875,41 @@ def clear_mode(key: str) -> tuple[bool, bool]:
 # speaking over the assistant no longer discards the reply already being
 # produced — the turn runs to completion and the full answer still reaches the
 # chat bridge/transcript. Per-key like the voice-only switch: the setting
-# describes this conversation, never the whole shim. Sticky (not one-shot),
-# and the DEFAULT is unset (cancellation ON) — today's behaviour stays the
-# safe baseline until a smarter heuristic has numbers to be judged against.
+# describes this conversation, never the whole shim. Sticky (not one-shot).
+#
+# TWO LEVELS, and the second one is why this setting exists. `/interrupt off`
+# writes a PER-KEY override, which lives in memory and is gone the moment the
+# shim restarts — so a room that wants cancellation off had to re-issue the
+# slash command after every restart, and a restart is not something the person
+# in the call can see. `barge_in_off` in the config file is the durable level:
+# it is what an un-overridden key falls back to, so the posture survives a
+# restart without anyone remembering to ask for it.
+#
+# The built-in default stays cancellation ON (false) — the same behaviour as
+# before the switch existed, so an unconfigured shim does not change meaning.
+# It is a stated default rather than an implicit one: a voice call is a bad
+# place to discover that a config key you never set had a side effect.
+#
+# WHY OFF IS THE RIGHT SETTING FOR A ROOM WITH BACKGROUND SPEECH. The cancel
+# fires on the VAD's `speech_started` — before any words exist — so "okay" and
+# "stop" are the same event and there is nothing to filter on. A child, a TV or
+# a second conversation therefore cancels an answer just as effectively as the
+# operator does, and the failure is silent: the reply dies at `0 chars` and the
+# person who asked hears nothing. Turning cancellation off makes the turn run to
+# completion instead, which is the strictly safer failure — a finished answer
+# that arrived late beats no answer at all.
+BARGE_IN_OFF_DEFAULT = bool(setting("SHIM_BARGE_IN_OFF", "barge_in_off", False))
+
 _BARGE_IN_OFF_BY_KEY: dict[str, bool] = {}
 _BARGE_IN_OFF_LOCK = Lock()
 
 
 def set_barge_in_off(key: str, off: bool | None) -> bool:
     """Set the barge-in-cancellation-off flag for a key. None clears it (falls
-    back to the configured default, cancellation ON). Returns the previous."""
+    back to `BARGE_IN_OFF_DEFAULT`, the configured default). Returns the
+    previous effective value."""
     with _BARGE_IN_OFF_LOCK:
-        previous = _BARGE_IN_OFF_BY_KEY.get(key, False)
+        previous = _BARGE_IN_OFF_BY_KEY.get(key, BARGE_IN_OFF_DEFAULT)
         if off is None:
             _BARGE_IN_OFF_BY_KEY.pop(key, None)
         else:
@@ -895,10 +918,11 @@ def set_barge_in_off(key: str, off: bool | None) -> bool:
 
 
 def is_barge_in_off(key: str) -> bool:
-    """Look up barge-in-cancellation-off state by key. Unknown keys return
-    False — cancellation stays ON, exactly as before the switch existed."""
+    """Look up barge-in-cancellation-off state by key. An unknown key returns
+    `BARGE_IN_OFF_DEFAULT` — the configured posture — so the setting survives a
+    restart instead of living only in the memory of whoever ran `/interrupt`."""
     with _BARGE_IN_OFF_LOCK:
-        return _BARGE_IN_OFF_BY_KEY.get(key, False)
+        return _BARGE_IN_OFF_BY_KEY.get(key, BARGE_IN_OFF_DEFAULT)
 
 
 # ── transcription switch ───────────────────────────────────────────────────
@@ -3567,11 +3591,18 @@ class Handler(BaseHTTPRequestHandler):
                 off = True
             elif raw in ("default", "clear"):
                 previous = set_barge_in_off(key, None)
-                state = "DEFAULT (interrupt enabled)"
+                # Report the posture the key now falls back to, not a hardcoded
+                # "enabled": with `barge_in_off` configured, clearing the
+                # override lands on OFF, and saying "interrupt enabled" there
+                # would be the same class of lie as claiming a chat mode the
+                # shim did not apply.
+                now_off = is_barge_in_off(key)
+                state = "DEFAULT (interrupt disabled)" if now_off else "DEFAULT (interrupt enabled)"
                 print(f"-> INTERRUPT [{key}] {state} (was {previous})", flush=True)
                 return self._json(
                     200,
-                    {"cancel": True, "previous": not previous, "key": key, "cleared": True},
+                    {"cancel": not now_off, "previous": not previous,
+                     "key": key, "cleared": True},
                 )
             else:
                 return self._json(
