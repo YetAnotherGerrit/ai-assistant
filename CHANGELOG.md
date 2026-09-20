@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 - MINOR version when you add functionality in a backwards-compatible manner, and
 - PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.50.0
 
 - feat: the barge-in posture can now be set in the config (`barge_in_off`) instead of only at runtime, so it survives a restart. `/interrupt off` writes a PER-KEY override that lives in memory and is gone the moment the shim restarts — which meant a room wanting cancellation off had to re-issue the slash command after every restart, and a restart is not something the person in the call can see. The config value is the durable level: what an un-overridden conversation falls back to, with `/interrupt default` clearing an override and returning to it. The built-in default stays cancellation ON, so an unconfigured shim does not change meaning, and the `/interrupt default` response now reports the posture the key actually falls back to rather than a hardcoded "interrupt enabled" — with `barge_in_off: true` configured, clearing an override lands on OFF and the old wording would have been the same class of lie as claiming a chat mode the shim did not apply. Rationale for wanting it off, recorded in the config: the cancel fires on the VAD's `speech_started` before any words exist, so a child or a TV cancels an answer exactly as effectively as the operator, and the reply dies at `0 chars` with the person who asked hearing nothing.
 
