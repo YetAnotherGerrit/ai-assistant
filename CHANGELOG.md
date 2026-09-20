@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 - MINOR version when you add functionality in a backwards-compatible manner, and
 - PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.48.0
 
 - fix: the launchd log directory and files are now owner-only (`0700`/`0600`) instead of the umask default. `speech-to-speech` logs the full request URL of every accepted websocket, so with the s2s gateway authenticating by `?token=` query param, the gateway token lands in `s2s.log` in cleartext — measured 2026-09-20 at 6 occurrences in a file that was mode `0644`, readable by any local user. This closes the local-read path; the token still reaches the log, so moving auth off the URL remains the complete fix.
 
