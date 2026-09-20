@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 - MINOR version when you add functionality in a backwards-compatible manner, and
 - PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.49.0
 
 - feat: the runtime image now carries `vault-cli`, and the `sc` identity's allowlist gains `Bash(vault-cli:*)`. The ConfigMap had recorded the opposite on purpose — vault-cli was absent from the image (verified in-pod 2026-08-31), so granting it would only widen the allowlist for a binary that could not run — and that comment named its own removal condition ("re-add together with the install"). Install and grant therefore land together, and the comment goes rather than accumulating a second, contradictory note beside it. `vault-cli` is fetched as the published release tarball (`vault-cli_linux_amd64.tar.gz`) and checksum-verified, so the image needs no Go toolchain.
 - feat: `CHAT_BRIDGE_TOKEN` is now provisioned in the cluster, on both sides. The authenticated control plane shipped after the version these clusters run, so the next restart onto a master-built image arms a fail-closed check that nothing on the cluster currently satisfies — a missing token reads as "the feature does nothing", not as a config error, which is why it is easy to ship and hard to notice. The Secret gains the key (the `CHAT_BRIDGE_TOKEN_KEY` lookup key already existed in the deploy env files; only the manifest line was missing) and the bot and shim both read it under that same name. Order is the whole point: token first, guarded image second.
