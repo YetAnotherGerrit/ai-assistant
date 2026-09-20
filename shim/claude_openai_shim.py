@@ -51,6 +51,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Event, Lock, Thread
+from typing import TypedDict
 
 # ── configuration ──────────────────────────────────────────────────────────
 # One flat config for one instance. Deliberately NOT multi-profile: two
@@ -1543,7 +1544,6 @@ def _transcript_has_non_voice_turn(path: Path, start_offset: int) -> tuple[bool,
     return False, consumed
 
 
-
 def bind_session(key: str, sid: str) -> dict:
     """Point a key at an EXISTING session id. Returns {} on success, else {error}.
 
@@ -1650,17 +1650,29 @@ RELAY_DIRECTIVE = (
 RELAY_MARKER = ".done"
 
 
+class RelayMessage(TypedDict):
+    """One claimed-or-pending peer answer.
+
+    `path` is the file it came from, carried so `claim_relay_messages` can
+    rename exactly the file that was read rather than re-deriving the name.
+    """
+    path: Path
+    sender: str
+    answer: str
+    when: str
+
+
 def relay_inbox() -> Path:
     return Path(RELAY_DIR) / "inbox"
 
 
-def read_relay_inbox() -> list[dict]:
+def read_relay_inbox() -> list[RelayMessage]:
     """Every answer that has landed and not yet been claimed. Never raises.
 
-    Returns dicts with `path` / `sender` / `answer` / `when`, oldest first. A
-    file that does not parse is skipped and LEFT IN PLACE: it is a peer's
-    message, and dropping it silently is the failure this whole path exists to
-    prevent. A half-written file is the same case — it has no `.done` marker.
+    Oldest first. A file that does not parse is skipped and LEFT IN PLACE: it is
+    a peer's message, and dropping it silently is the failure this whole path
+    exists to prevent. A half-written file is the same case — it has no `.done`
+    marker.
     """
     if not RELAY_DIR:
         return []
@@ -1668,7 +1680,7 @@ def read_relay_inbox() -> list[dict]:
         candidates = sorted(relay_inbox().glob("*.answer.json"))
     except OSError:
         return []
-    out: list[dict] = []
+    out: list[RelayMessage] = []
     for path in candidates:
         try:
             with path.open(encoding="utf-8") as fh:
@@ -1684,7 +1696,7 @@ def read_relay_inbox() -> list[dict]:
     return out
 
 
-def claim_relay_messages(msgs: list[dict]) -> None:
+def claim_relay_messages(msgs: list[RelayMessage]) -> None:
     """Mark answers as delivered by an atomic rename. Never raises.
 
     Called AFTER the turn's prompt has been written to the child, not before.
@@ -1704,7 +1716,7 @@ def claim_relay_messages(msgs: list[dict]) -> None:
             pass                          # another reader took it; fine
 
 
-def relay_prompt_block(msgs: list[dict]) -> str:
+def relay_prompt_block(msgs: list[RelayMessage]) -> str:
     """The in-context note that makes a landed answer speakable.
 
     Prefixed to the user's turn rather than injected as its own message: a peer
@@ -1721,7 +1733,6 @@ def relay_prompt_block(msgs: list[dict]) -> str:
         when = f" ({m['when']})" if m["when"] else ""
         lines.append(f"- from {who}{when}: {m['answer']}")
     return "\n".join(lines) + "\n\n"
-
 
 
 TRANSCRIPT_DIRECTIVE = (

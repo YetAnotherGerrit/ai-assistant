@@ -2211,7 +2211,6 @@ class CrossCwdSwitch(unittest.TestCase):
         self.assertIn("already bound", err)
 
 
-
 class RelayInbox(unittest.TestCase):
     """A peer reply delivered as a file, because a peer message cannot arrive.
 
@@ -2239,22 +2238,23 @@ class RelayInbox(unittest.TestCase):
         p.write_text(json.dumps(payload), encoding="utf-8")
         return p
 
+    def _one(self, sender="peer", answer="x", name="a.answer.json"):
+        """The single-answer case, which most of these tests exercise."""
+        self._answer(name, {"sender": sender, "answer": answer})
+        return shim.read_relay_inbox()
+
     def test_reading_does_not_consume(self):
         # The whole point of splitting read from claim: a turn that dies before
         # its prompt reaches the child must not have eaten the answer.
-        self._answer("a.answer.json", {"sender": "Fleet Manager", "answer": "Yes."})
-        self.assertEqual(len(shim.read_relay_inbox()), 1)
+        self._one("Fleet Manager", "Yes.")
         self.assertEqual(len(shim.read_relay_inbox()), 1, "read must not claim")
 
     def test_claiming_consumes_exactly_once(self):
-        self._answer("a.answer.json", {"sender": "Fleet Manager", "answer": "Yes."})
-        msgs = shim.read_relay_inbox()
-        shim.claim_relay_messages(msgs)
+        shim.claim_relay_messages(self._one("Fleet Manager", "Yes."))
         self.assertEqual(shim.read_relay_inbox(), [])
 
     def test_claiming_twice_is_harmless(self):
-        self._answer("a.answer.json", {"sender": "p", "answer": "x"})
-        msgs = shim.read_relay_inbox()
+        msgs = self._one()
         shim.claim_relay_messages(msgs)
         shim.claim_relay_messages(msgs)          # must not raise
         self.assertEqual(shim.read_relay_inbox(), [])
@@ -2270,7 +2270,7 @@ class RelayInbox(unittest.TestCase):
         self.assertTrue(bad.exists(), "an unparseable answer must not be consumed")
 
     def test_an_empty_answer_is_not_spoken(self):
-        self._answer("e.answer.json", {"sender": "peer", "answer": "   "})
+        self._one(answer="   ", name="e.answer.json")
         self.assertEqual(shim.read_relay_inbox(), [])
 
     def test_answers_are_read_oldest_first(self):
