@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 - MINOR version when you add functionality in a backwards-compatible manner, and
 - PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.46.1
 
 - fix: a `~/…` path in the config is now expanded, so the peer relay's inbox is actually found. `relay_dir` was read straight from the config, and `Path("~/x")` is a RELATIVE path naming a directory literally called `~` — so the relay shipped in v0.46.0 was silently inert for anyone writing the path the way `config.example.yaml` writes every path. Found at deploy, reading the live config back, not by any test: every relay test injects a real temp path, so none of them could fail on it. `TRANSCRIPT_DIR` had the same latent bug and is fixed with it. The fix also preserves empty as empty — `Path("").expanduser()` is `"."`, so expanding unconditionally would turn an unset transcript dir into the current directory and arm the transcript directive with a bogus path.
 
