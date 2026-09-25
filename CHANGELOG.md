@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 - MINOR version when you add functionality in a backwards-compatible manner, and
 - PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.51.5
 
 - fix: name the release timeout for an empty room, not for silence. `VOICE_EMPTY_ROOM_RELEASE_MS` / `config.voiceEmptyRoomReleaseMs` replace the `IDLE` names, because the trigger is `humansIn(channel) === 0` — the room being empty — not quiet: talking to yourself indefinitely never releases the bot while walking out does, and the old name misled exactly that way during the 2026-09-25 live run. `scheduleIdleRelease` / `cancelIdleRelease` / `idleReleaseTimer` become `scheduleEmptyRoomRelease` / `cancelEmptyRoomRelease` / `emptyRoomReleaseTimer`, the leave reason `'idle'` becomes `'empty-room'`, and the log line is now `voice: empty-room grace expired, releasing session` (previously `voice: idle grace expired, releasing session`). `VOICE_IDLE_RELEASE_MS` is still accepted as a fallback so no existing `local.env` breaks. No behaviour change: same default, same trigger, same timer semantics.
 
