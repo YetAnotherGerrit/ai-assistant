@@ -107,6 +107,14 @@ client.once('clientReady', async () => {
     if (ghost) log.warn('evicted leftover voice connection', { guild: guild.name, channel: ghost });
   }
 
+  // If that process died mid-call, put the bot back in it. Deliberately after
+  // the eviction above: that is what removes the dead process's ghost, so the
+  // rejoin replaces it rather than racing it. A voice-disabled instance has no
+  // call to restore, and restoreCall never throws, so boot cannot fail here.
+  if (config.voiceEnabled) {
+    await voice.restoreCall(client).catch(() => null);
+  }
+
   // Guild-scoped registration applies immediately; global takes ~an hour.
   const rest = new REST().setToken(config.discordToken);
   for (const guild of client.guilds.cache.values()) {

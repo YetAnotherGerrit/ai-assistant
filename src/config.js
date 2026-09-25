@@ -263,6 +263,12 @@ const config = {
   voiceRejoinBaseMs: parseInt(process.env.VOICE_REJOIN_BASE_MS || '2000', 10),
   voiceRejoinMaxDelayMs: parseInt(process.env.VOICE_REJOIN_MAX_DELAY_MS || '60000', 10),
   voiceRejoinMaxAttempts: parseInt(process.env.VOICE_REJOIN_MAX_ATTEMPTS || '5', 10),
+  // Where the bot writes the call it is currently in, so a restart can rejoin
+  // it — see restoreCall in voice.js. Empty means "use the default path", which
+  // voice.js resolves: config stays data-only and free of path logic, and the
+  // default lives under the home directory rather than /tmp because a state
+  // file that a reboot erases is not worth writing.
+  voiceStatePath: process.env.VOICE_STATE_PATH || '',
   // How long a spoken turn may go without producing audio before the bot
   // treats the wait as a stall worth speaking into. The mic turn's clock
   // starts when the user stops speaking (`input_audio_buffer.speech_stopped`),

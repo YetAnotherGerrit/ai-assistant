@@ -14,6 +14,7 @@ const {
 const prism = require('prism-media');
 const { PassThrough } = require('stream');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const WebSocket = require('ws');
 const config = require('./config');
@@ -1431,6 +1432,9 @@ async function join(channel) {
   // The call is live, so any rejoin sequence that led here is finished and its
   // attempt counter must not carry into the next disconnect.
   cancelRejoin(channel.guild.id);
+  // The call is live, so write it down: if this process dies from here, the
+  // next one restores the call from this record (see restoreCall).
+  rememberCall(channel.guild.id, channel.id);
   log.info('voice: joined', { channel: channel.name, transcribing: Boolean(session.transcript) });
   return session;
 }
@@ -1560,6 +1564,140 @@ function scheduleRejoin(guildId, channel) {
 }
 
 /**
+ * The default location of the restart record.
+ *
+ * Resolved here rather than in config.js so that module stays data-only (see
+ * the repo's coding guidelines). The identity is part of the filename because
+ * this machine runs several identities from sibling checkouts that all share
+ * `$HOME`: one shared filename would let the boss bot read the personal bot's
+ * record and join a call it was never in — and then fight it for the single
+ * s2s slot.
+ */
+function defaultVoiceStatePath(identity = config.identity) {
+  const suffix = identity ? `-${identity}` : '';
+  return path.join(os.homedir(), '.local', 'state', 'discord-assistant', `live-call${suffix}.json`);
+}
+
+const VOICE_STATE_PATH = config.voiceStatePath || defaultVoiceStatePath();
+
+/**
+ * The leave reasons that end a call for good: the operator asked, the channel
+ * went idle, or another identity took the single s2s slot.
+ *
+ * Only these clear the remembered call. Every other reason PRESERVES it, and
+ * `shutdown` is the load-bearing one — index.js's SIGTERM handler leaves with
+ * exactly that reason, so clearing here would wipe the record on the very
+ * restart this feature exists to survive. `pre-join` must also preserve it:
+ * it fires at the top of every `join()`, including a rejoin, so clearing there
+ * would erase the record mid-rejoin. `slot-in-use` is in the clearing set for
+ * the same reason as `yield`: it is contention for the one s2s slot, and a
+ * boot-time rejoin would fight the identity that won it.
+ */
+const CALL_ENDING_REASONS = new Set(['command', 'idle', 'yield', 'slot-in-use']);
+
+/**
+ * Write down which call this process is in, so a restart can restore it.
+ *
+ * A restart is not a disconnect the running code can act on — the process is
+ * gone before `stateChange` can fire, and the replacement process has no memory
+ * of the call. So honouring "the bot leaves only on /leave, an idle timeout, or
+ * a yield" across a restart means persisting the call and rejoining from it at
+ * boot (see `restoreCall`). On 2026-09-25 a `launchctl kickstart -k` deploy
+ * dropped the operator's call and nothing brought it back.
+ *
+ * Best-effort on purpose: a failed write costs the restore, never the call.
+ */
+function rememberCall(guildId, channelId) {
+  try {
+    fs.mkdirSync(path.dirname(VOICE_STATE_PATH), { recursive: true });
+    fs.writeFileSync(VOICE_STATE_PATH, JSON.stringify({ guildId, channelId }));
+  } catch (e) {
+    log.warn('voice: could not persist the live call, a restart will not restore it', {
+      error: e.message,
+    });
+  }
+}
+
+/** Forget the call. Called only for the reasons in CALL_ENDING_REASONS. */
+function forgetCall() {
+  try {
+    fs.rmSync(VOICE_STATE_PATH, { force: true });
+  } catch (e) {
+    log.warn('voice: could not clear the persisted call', { error: e.message });
+  }
+}
+
+/** The remembered call, or null when there is none or it is unreadable. */
+function readRememberedCall() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(VOICE_STATE_PATH, 'utf8'));
+    if (!parsed?.guildId || !parsed?.channelId) return null;
+    return parsed;
+  } catch {
+    // Absent is the normal case on a clean start, and unreadable means the same
+    // thing: nothing to restore. Neither is worth a warning on every boot.
+    return null;
+  }
+}
+
+/**
+ * Rejoin the call this bot was in when the previous process stopped.
+ *
+ * Called once from index.js at clientReady, deliberately AFTER the leftover
+ * voice connections are evicted: that eviction removes the dead process's ghost
+ * from the channel, so joining here replaces it instead of racing it.
+ *
+ * Never throws. A restore that cannot complete must not stop the bot from
+ * starting — that would trade a missing call for a missing bot.
+ *
+ * The record is cleared only when the target is permanently gone. A join that
+ * merely failed is left in place so the next restart can try again.
+ */
+async function restoreCall(client) {
+  const remembered = readRememberedCall();
+  if (!remembered) return null;
+  const { guildId, channelId } = remembered;
+  const guild = client.guilds.cache.get(guildId);
+  const channel = guild?.channels?.cache?.get(channelId);
+  if (!guild || !channel) {
+    log.warn('voice: not restoring the call — its guild or channel no longer exists', {
+      guildId,
+      channelId,
+    });
+    forgetCall();
+    return null;
+  }
+  // A record outlives the call it describes whenever the process died and was
+  // not restarted for a while — a laptop shut overnight, a crash left for a
+  // day. Rejoining an empty channel would park the bot there holding the single
+  // s2s slot until the idle timeout released it an hour later, which is exactly
+  // the squatter shape that release exists to prevent. Only a definite 0 skips
+  // the restore: `humansIn` returns null for an unreadable channel, and
+  // skipping on unknown would let a cache that is not warm at clientReady
+  // silently disable the whole feature.
+  if (humansIn(channel) === 0) {
+    log.info('voice: not restoring the call — the channel is empty', { guildId, channelId });
+    forgetCall();
+    return null;
+  }
+  try {
+    await join(channel);
+    log.info('voice: restored the call after a restart', {
+      guild: guild.name,
+      channel: channel.name,
+    });
+    return channel.name;
+  } catch (e) {
+    log.error('voice: could not restore the call after a restart', {
+      guildId,
+      channelId,
+      error: e.message,
+    });
+    return null;
+  }
+}
+
+/**
  * Leave a call. `reason` is diagnostics, not a branch: what decides whether a
  * disconnect is repaired is simply whether `leave()` was called at all. Every
  * intentional path — `/leave`, the idle timeout, a yield, shutdown — goes
@@ -1573,6 +1711,9 @@ function scheduleRejoin(guildId, channel) {
  */
 function leave(guildId, reason = 'unspecified') {
   if (reason !== 'pre-join') cancelRejoin(guildId);
+  // Only a call-ending reason forgets the call. Everything else keeps the
+  // record so a restart can restore it — see CALL_ENDING_REASONS.
+  if (CALL_ENDING_REASONS.has(reason)) forgetCall();
   const s = sessions.get(guildId);
   if (s) {
     // Set before `destroy()`: if that emits `stateChange` synchronously, the
@@ -2006,6 +2147,14 @@ module.exports = {
   cancelRejoin,
   rejoinDelayMs,
   rejoins,
+  // Exported for index.js's boot path and for unit tests: the restart-restore
+  // record is file I/O over a path, so exercising it needs no Discord
+  // connection.
+  restoreCall,
+  rememberCall,
+  forgetCall,
+  readRememberedCall,
+  defaultVoiceStatePath,
   // Exported for unit tests to exercise Session.prototype.speak against a
   // fake ws (no real audio pipeline needed) — see test/voice.test.js.
   Session,
