@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 - MINOR version when you add functionality in a backwards-compatible manner, and
 - PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.51.4
 
 - fix: leave the call when another voice bot joins the channel. Only one bot can hold the speech-to-speech slot, so a second one arriving means this bot has to go — the same handover the shim's yield performs, but observed directly in `noteVoiceState` instead of requested from outside. It is an intentional leave through `leave(guildId, 'another-bot-joined')`, so neither the `stateChange` handler nor the kick/move repair path tries to bring this bot back and the two do not fight over the slot; the reason is also in `CALL_ENDING_REASONS`, so the persisted restart-restore record is cleared and a later deploy cannot resurrect the call either. Logs `voice: another bot joined, leaving`. Guards on the bot's own id, so it never fires on this bot's own arrival, on a human arriving, or when the member list is unreadable — an unreadable `botId` fails safe by leaving the call alone rather than abandoning it.
 
