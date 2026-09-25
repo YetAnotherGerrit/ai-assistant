@@ -1852,6 +1852,12 @@ function noteVoiceState(oldState, newState) {
   // `was` is implied by `!is` (line 1788 returns when they are equal). The
   // `leaveReason` check is belt-and-braces: an intentional leave deletes the
   // session, so `sessions.get` above has normally already returned.
+  //
+  // Reading module-level `log` / `scheduleRejoin` here is deliberate and not a
+  // `node/architecture/inject-dependencies` violation: that rule is scoped to
+  // app and handler FACTORIES taking mutable module state as a parameter, and
+  // `noteVoiceState`, `scheduleRejoin` and `leave` are all plain module
+  // functions — the same shape the `stateChange` handler above already uses.
   const botId = channel?.guild?.members?.me?.id;
   if (!is && botId && userId === botId && !session.leaveReason) {
     log.info('voice: bot left its channel, returning', {
