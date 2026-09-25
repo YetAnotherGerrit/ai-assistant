@@ -249,12 +249,20 @@ const config = {
   // — the infinite-retry bug this deadline's sibling behaviour fixed must not
   // come back, so this is a deadline, never unset.
   voiceSlotRetryDeadlineMs: parseInt(process.env.VOICE_SLOT_RETRY_DEADLINE_MS || '10000', 10),
-  // How long an empty voice channel keeps the session (and its s2s slot) after
-  // the last human leaves, before the bot leaves too. A brief absence must not
-  // cost the conversation; a squatter must not hold the slot forever. The
-  // handover bypasses this entirely — a joining bot evicts an idle holder
-  // immediately via the shim's yield, never waiting out the grace window.
-  voiceIdleReleaseMs: parseInt(process.env.VOICE_IDLE_RELEASE_MS || '3600000', 10),
+  // How long an EMPTY voice channel keeps the session (and its s2s slot) after
+  // the last human leaves, before the bot leaves too. Named for the empty room,
+  // not for silence: the trigger is `humansIn(channel) === 0`, so talking to
+  // yourself indefinitely never releases the bot while walking out does. The
+  // previous name (`VOICE_IDLE_RELEASE_MS` / `voiceIdleReleaseMs`) said "idle"
+  // and misled exactly that way — it is still accepted as a fallback so no
+  // existing local.env breaks. A brief absence must not cost the conversation;
+  // a squatter must not hold the slot forever. The handover bypasses this
+  // entirely — a joining bot evicts a holder whose room is empty immediately
+  // via the shim's yield, never waiting out the grace window.
+  voiceEmptyRoomReleaseMs: parseInt(
+    process.env.VOICE_EMPTY_ROOM_RELEASE_MS || process.env.VOICE_IDLE_RELEASE_MS || '3600000',
+    10,
+  ),
   // Auto-rejoin backoff after a disconnect nobody asked for — see
   // scheduleRejoin in voice.js. Delays double from voiceRejoinBaseMs, capped at
   // voiceRejoinMaxDelayMs, for at most voiceRejoinMaxAttempts attempts. The cap

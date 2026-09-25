@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 - MINOR version when you add functionality in a backwards-compatible manner, and
 - PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: name the release timeout for an empty room, not for silence. `VOICE_EMPTY_ROOM_RELEASE_MS` / `config.voiceEmptyRoomReleaseMs` replace the `IDLE` names, because the trigger is `humansIn(channel) === 0` — the room being empty — not quiet: talking to yourself indefinitely never releases the bot while walking out does, and the old name misled exactly that way during the 2026-09-25 live run. `scheduleIdleRelease` / `cancelIdleRelease` / `idleReleaseTimer` become `scheduleEmptyRoomRelease` / `cancelEmptyRoomRelease` / `emptyRoomReleaseTimer`, the leave reason `'idle'` becomes `'empty-room'`, and the log line is now `voice: empty-room grace expired, releasing session` (previously `voice: idle grace expired, releasing session`). `VOICE_IDLE_RELEASE_MS` is still accepted as a fallback so no existing `local.env` breaks. No behaviour change: same default, same trigger, same timer semantics.
+
 ## v0.51.4
 
 - fix: leave the call when another voice bot joins the channel. Only one bot can hold the speech-to-speech slot, so a second one arriving means this bot has to go — the same handover the shim's yield performs, but observed directly in `noteVoiceState` instead of requested from outside. It is an intentional leave through `leave(guildId, 'another-bot-joined')`, so neither the `stateChange` handler nor the kick/move repair path tries to bring this bot back and the two do not fight over the slot; the reason is also in `CALL_ENDING_REASONS`, so the persisted restart-restore record is cleared and a later deploy cannot resurrect the call either. Logs `voice: another bot joined, leaving`. Guards on the bot's own id, so it never fires on this bot's own arrival, on a human arriving, or when the member list is unreadable — an unreadable `botId` fails safe by leaving the call alone rather than abandoning it.
