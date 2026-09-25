@@ -401,7 +401,7 @@ client.on('interactionCreate', async (i) => {
   }
 
   if (i.commandName === 'leave') {
-    const left = voice.leave(i.guildId);
+    const left = voice.leave(i.guildId, 'command');
     await i.reply({
       content: left ? 'Left.' : 'Not in a voice channel.',
       flags: MessageFlags.Ephemeral,
@@ -459,7 +459,7 @@ function shutdown(signal) {
   // update a moment to actually reach Discord. Destroying the client straight
   // away cuts the connection first, leaving the bot as a ghost participant
   // that a later process then has to evict.
-  for (const id of [...voice.sessions.keys()]) voice.leave(id);
+  for (const id of [...voice.sessions.keys()]) voice.leave(id, 'shutdown');
   for (const guild of client.guilds.cache.values()) {
     voice.evictGhost(guild).catch(() => {});
   }

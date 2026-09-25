@@ -57,6 +57,11 @@ let transcribeCalls = [];
 
 test.beforeEach(() => {
   voice.sessions.clear();
+  // A test that armed a rejoin must not leave the timer or the attempt counter
+  // behind for the next one — the counter is module-level by design (a rejoin
+  // replaces the Session), so clearing `sessions` alone does not reset it.
+  for (const state of voice.rejoins.values()) if (state.timer) clearTimeout(state.timer);
+  voice.rejoins.clear();
   typedTurnCalls = [];
   voiceSoloCalls = [];
   voiceWakeCalls = [];
@@ -1935,5 +1940,142 @@ test('setTranscribing toggling off and on keeps one transcript, not fragments', 
     assert.equal(session.transcript, first, 're-enable must reuse the same session');
   } finally {
     config.transcriptDir = originalDir;
+  }
+});
+
+// --- leave-reason gating + auto-rejoin (2026-09-25) -------------------------
+//
+// The contract: the bot leaves a call only on /leave, an idle timeout, or a
+// yield to another identity; every OTHER disconnect rejoins the same channel.
+// Two halves are unit-testable — the reason bookkeeping (leave() records why,
+// which is what lets the stateChange handler tell an intentional leave from a
+// drop) and the backoff sequence. The trigger itself, a real Discord socket
+// dropping, needs a live call: see CLAUDE.md's "Verifying Voice Changes".
+
+/** A channel-shaped object good enough for scheduleRejoin's re-resolve. */
+function fakeChannel(guildId = 'G1', id = 'chan-1') {
+  return { id, guild: { id: guildId, channels: { cache: { get: () => undefined } } } };
+}
+
+test('leave() records the reason for every intentional path and drops the session', () => {
+  for (const reason of ['command', 'idle', 'yield', 'slot-in-use', 'shutdown']) {
+    const session = fakeSession({ guildId: 'G1' });
+    let destroyed = false;
+    session.destroy = () => {
+      destroyed = true;
+    };
+    voice.sessions.set('G1', session);
+
+    assert.equal(voice.leave('G1', reason), true);
+    assert.equal(session.leaveReason, reason, `leave() must record ${reason}`);
+    assert.equal(destroyed, true, `leave() must destroy the session for ${reason}`);
+    assert.equal(voice.sessions.has('G1'), false, `the session must be gone after ${reason}`);
+  }
+});
+
+test('a live session carries no leaveReason — that null is the rejoin trigger', () => {
+  const session = fakeSession({ guildId: 'G1' });
+  voice.sessions.set('G1', session);
+  assert.equal(session.leaveReason, null);
+});
+
+test('rejoinDelayMs doubles from the base and stops at the cap', () => {
+  const saved = { base: config.voiceRejoinBaseMs, cap: config.voiceRejoinMaxDelayMs };
+  config.voiceRejoinBaseMs = 2000;
+  config.voiceRejoinMaxDelayMs = 60000;
+  try {
+    assert.deepEqual(
+      [1, 2, 3, 4, 5].map((n) => voice.rejoinDelayMs(n)),
+      [2000, 4000, 8000, 16000, 32000],
+    );
+    // The cap is the guard against an unbounded wait if the attempt count is
+    // ever raised past the point where doubling outruns it.
+    assert.equal(voice.rejoinDelayMs(10), 60000);
+  } finally {
+    config.voiceRejoinBaseMs = saved.base;
+    config.voiceRejoinMaxDelayMs = saved.cap;
+  }
+});
+
+test('cancelRejoin ends an armed sequence', () => {
+  voice.scheduleRejoin('G1', fakeChannel());
+  assert.equal(voice.rejoins.get('G1').attempts, 1);
+  voice.cancelRejoin('G1');
+  assert.equal(voice.rejoins.has('G1'), false);
+});
+
+test('leave("pre-join") preserves the sequence — join() must not reset the counter', () => {
+  voice.scheduleRejoin('G1', fakeChannel());
+  voice.sessions.set('G1', fakeSession({ guildId: 'G1' }));
+  try {
+    voice.leave('G1', 'pre-join');
+    // The counter survives, so a rejoin that keeps failing cannot loop forever
+    // at attempt 1 — which is exactly why `pre-join` is exempt from
+    // cancelRejoin.
+    assert.equal(voice.rejoins.get('G1')?.attempts, 1);
+  } finally {
+    voice.cancelRejoin('G1');
+  }
+});
+
+test('scheduleRejoin abandons loudly once the attempt budget is spent', () => {
+  const savedMax = config.voiceRejoinMaxAttempts;
+  config.voiceRejoinMaxAttempts = 2;
+  try {
+    const session = fakeSession({ guildId: 'G1' });
+    voice.sessions.set('G1', session);
+
+    // Advance the counter without waiting on real timers: clearing the timer
+    // while keeping the counter is the exact state the next call observes.
+    for (let i = 0; i < 2; i += 1) {
+      voice.scheduleRejoin('G1', fakeChannel());
+      const state = voice.rejoins.get('G1');
+      clearTimeout(state.timer);
+      state.timer = null;
+    }
+    assert.equal(voice.rejoins.get('G1').attempts, 2);
+
+    voice.scheduleRejoin('G1', fakeChannel()); // 3 > budget → abandon
+    assert.equal(voice.rejoins.has('G1'), false, 'the sequence must end');
+    assert.equal(voice.sessions.has('G1'), false, 'the session must be released');
+    assert.equal(session.leaveReason, 'rejoin-abandoned');
+  } finally {
+    config.voiceRejoinMaxAttempts = savedMax;
+  }
+});
+
+test('a non-finite base delay falls back to the documented default', () => {
+  const saved = config.voiceRejoinBaseMs;
+  config.voiceRejoinBaseMs = NaN; // what `parseInt('abc', 10)` yields
+  try {
+    // Without the guard this is NaN, and `setTimeout(fn, NaN)` fires at once.
+    assert.equal(voice.rejoinDelayMs(1), 2000);
+  } finally {
+    config.voiceRejoinBaseMs = saved;
+  }
+});
+
+test('a non-finite attempt budget still abandons — NaN must not mean "retry forever"', () => {
+  const savedMax = config.voiceRejoinMaxAttempts;
+  config.voiceRejoinMaxAttempts = NaN;
+  try {
+    const session = fakeSession({ guildId: 'G1' });
+    voice.sessions.set('G1', session);
+
+    for (let i = 0; i < 5; i += 1) {
+      voice.scheduleRejoin('G1', fakeChannel());
+      const state = voice.rejoins.get('G1');
+      clearTimeout(state.timer);
+      state.timer = null;
+    }
+    assert.equal(voice.rejoins.get('G1').attempts, 5);
+
+    // `attempts > NaN` is always false, so without the guard this call arms an
+    // immediate retry instead of abandoning, and the loop never stops.
+    voice.scheduleRejoin('G1', fakeChannel());
+    assert.equal(voice.rejoins.has('G1'), false, 'NaN must fall back to the default budget');
+    assert.equal(session.leaveReason, 'rejoin-abandoned');
+  } finally {
+    config.voiceRejoinMaxAttempts = savedMax;
   }
 });
