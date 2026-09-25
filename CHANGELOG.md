@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 - MINOR version when you add functionality in a backwards-compatible manner, and
 - PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.51.3
 
 - fix: return to its own channel when the bot leaves it, whether moved or kicked. Neither is a disconnect: discord.js follows a move (`ready -> connecting -> ready`), and a Discord-side kick goes `ready -> signalling` and then nothing at all — so the `stateChange` handler never sees a `Disconnected` it could repair. Measured live 2026-09-25: after each, the bot sat outside its channel and nothing brought it back. `noteVoiceState` now treats the bot's own member no longer being in its channel as an unrequested leave and repairs it with the same bounded rejoin, logging `voice: bot left its channel, returning`. The target is always the original channel and the destination is never read, so a kick's null and a move's other channel are handled alike. It sits after the empty-channel block, so leaving an empty channel still follows the idle-release path, and before the transcript guard, so `TRANSCRIBE` off is repaired too.
 
