@@ -10,7 +10,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
-- fix: restore a live voice call after a process restart. A restart is not a disconnect the running process can repair — it is gone before `stateChange` can fire — so the bot now writes the call it is in to `VOICE_STATE_PATH` (default `~/.local/state/discord-assistant/live-call.json`) and rejoins it at boot, after the leftover-connection eviction that removes the dead process's ghost. The record is cleared only on the leaves that genuinely end a call (`/leave`, idle, yield, slot-in-use) and deliberately preserved on `shutdown` — which is what a restart looks like from inside the process — and on a rejoin's own `pre-join` cleanup. Found 2026-09-25: a `launchctl kickstart -k` deploy dropped the operator's call and nothing brought it back.
+- fix: restore a live voice call after a process restart. A restart is not a disconnect the running process can repair — it is gone before `stateChange` can fire — so the bot now writes the call it is in to `VOICE_STATE_PATH` (default `~/.local/state/discord-assistant/live-call-<identity>.json`; the identity is in the name because several bots share one `$HOME`) and rejoins it at boot, after the leftover-connection eviction that removes the dead process's ghost, and only when somebody is still in the channel — a record outlives the call it describes. The record is cleared only on the leaves that genuinely end a call (`/leave`, idle, yield, slot-in-use) and deliberately preserved on `shutdown` — which is what a restart looks like from inside the process — and on a rejoin's own `pre-join` cleanup. Found 2026-09-25: a `launchctl kickstart -k` deploy dropped the operator's call and nothing brought it back.
 
 ## v0.51.1
 

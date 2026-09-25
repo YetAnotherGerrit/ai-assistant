@@ -2162,3 +2162,39 @@ test('restoreCall clears a record whose guild or channel is gone', async () => {
     'a permanently gone target must not be retried on every boot',
   );
 });
+
+// humansIn() reads `channel.members` and needs a Collection-shaped filter, so
+// this fake carries one — the rejoin tests' plain fakeChannel has no members.
+function fakeVoiceChannel({ humans = 0, guildId = 'G1', id = 'chan-9' } = {}) {
+  const members = new Map();
+  for (let i = 0; i < humans; i += 1) members.set(`u${i}`, { user: { bot: false } });
+  members.filter = (fn) => new Map([...members].filter(([, m]) => fn(m)));
+  const guild = { id: guildId, name: 'G', channels: { cache: { get: () => channel } } };
+  const channel = { id, name: 'General', members, guild };
+  return channel;
+}
+
+test('the default record path is per identity — sibling bots share one $HOME', () => {
+  assert.ok(
+    voice.defaultVoiceStatePath('sc').endsWith('live-call-sc.json'),
+    'the identity must be part of the filename',
+  );
+  assert.ok(voice.defaultVoiceStatePath('').endsWith('live-call.json'));
+  assert.notEqual(
+    voice.defaultVoiceStatePath('boss'),
+    voice.defaultVoiceStatePath('personal'),
+    'two identities must never share one record',
+  );
+});
+
+test('restoreCall clears the record when the channel is empty — a stale call is not a live one', async () => {
+  voice.rememberCall('G1', 'chan-9');
+  const channel = fakeVoiceChannel({ humans: 0 });
+  const client = { guilds: { cache: new Map([['G1', channel.guild]]) } };
+  assert.equal(await voice.restoreCall(client), null);
+  assert.equal(
+    voice.readRememberedCall(),
+    null,
+    'rejoining an empty channel would park the bot there holding the s2s slot',
+  );
+});

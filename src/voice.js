@@ -1564,12 +1564,21 @@ function scheduleRejoin(guildId, channel) {
 }
 
 /**
- * Where the live call is written down. Resolved here rather than in config.js
- * so that module stays data-only (see the repo's coding guidelines).
+ * The default location of the restart record.
+ *
+ * Resolved here rather than in config.js so that module stays data-only (see
+ * the repo's coding guidelines). The identity is part of the filename because
+ * this machine runs several identities from sibling checkouts that all share
+ * `$HOME`: one shared filename would let the boss bot read the personal bot's
+ * record and join a call it was never in — and then fight it for the single
+ * s2s slot.
  */
-const VOICE_STATE_PATH =
-  config.voiceStatePath ||
-  path.join(os.homedir(), '.local', 'state', 'discord-assistant', 'live-call.json');
+function defaultVoiceStatePath(identity = config.identity) {
+  const suffix = identity ? `-${identity}` : '';
+  return path.join(os.homedir(), '.local', 'state', 'discord-assistant', `live-call${suffix}.json`);
+}
+
+const VOICE_STATE_PATH = config.voiceStatePath || defaultVoiceStatePath();
 
 /**
  * The leave reasons that end a call for good: the operator asked, the channel
@@ -1655,6 +1664,19 @@ async function restoreCall(client) {
       guildId,
       channelId,
     });
+    forgetCall();
+    return null;
+  }
+  // A record outlives the call it describes whenever the process died and was
+  // not restarted for a while — a laptop shut overnight, a crash left for a
+  // day. Rejoining an empty channel would park the bot there holding the single
+  // s2s slot until the idle timeout released it an hour later, which is exactly
+  // the squatter shape that release exists to prevent. Only a definite 0 skips
+  // the restore: `humansIn` returns null for an unreadable channel, and
+  // skipping on unknown would let a cache that is not warm at clientReady
+  // silently disable the whole feature.
+  if (humansIn(channel) === 0) {
+    log.info('voice: not restoring the call — the channel is empty', { guildId, channelId });
     forgetCall();
     return null;
   }
@@ -2132,6 +2154,7 @@ module.exports = {
   rememberCall,
   forgetCall,
   readRememberedCall,
+  defaultVoiceStatePath,
   // Exported for unit tests to exercise Session.prototype.speak against a
   // fake ws (no real audio pipeline needed) — see test/voice.test.js.
   Session,
