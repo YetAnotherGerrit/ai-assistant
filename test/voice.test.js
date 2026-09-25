@@ -4,6 +4,16 @@ const test = require('node:test');
 const assert = require('node:assert');
 const { EventEmitter } = require('node:events');
 const WebSocket = require('ws');
+// The restart-restore record is a real file on disk, so redirect it to a temp
+// path BEFORE the module resolves it — otherwise every run of this suite would
+// write into the developer's ~/.local/state. Same trap and same fix as the
+// IDENTITY delete below: the value has to be right before the first require.
+const os = require('node:os');
+const pathMod = require('node:path');
+const fsMod = require('node:fs');
+const STATE_DIR = fsMod.mkdtempSync(pathMod.join(os.tmpdir(), 'voice-state-'));
+process.env.VOICE_STATE_PATH = pathMod.join(STATE_DIR, 'live-call.json');
+
 // `make precommit` sources local.env (Makefile `-include`), which sets
 // IDENTITY, and these key-shape tests assume a single-identity deployment —
 // exactly the trap test/llm.test.js already dodges by deleting the var before
@@ -62,6 +72,9 @@ test.beforeEach(() => {
   // replaces the Session), so clearing `sessions` alone does not reset it.
   for (const state of voice.rejoins.values()) if (state.timer) clearTimeout(state.timer);
   voice.rejoins.clear();
+  // The restart-restore record is module-level state too, so a test that wrote
+  // one must not hand it to the next.
+  voice.forgetCall();
   typedTurnCalls = [];
   voiceSoloCalls = [];
   voiceWakeCalls = [];
@@ -2078,4 +2091,74 @@ test('a non-finite attempt budget still abandons — NaN must not mean "retry fo
   } finally {
     config.voiceRejoinMaxAttempts = savedMax;
   }
+});
+
+// --- restart-restore (2026-09-25) -------------------------------------------
+//
+// A restart is not a disconnect the running process can repair — it is gone
+// before `stateChange` can fire — so the call is written down and restored at
+// boot. What is unit-testable is the record's lifecycle: which leaves clear it
+// and which must preserve it. The restore itself needs a real Discord client;
+// see CLAUDE.md's "Verifying Voice Changes".
+
+const STATE_FILE = process.env.VOICE_STATE_PATH;
+
+test('rememberCall writes the call and readRememberedCall reads it back', () => {
+  voice.rememberCall('G1', 'chan-9');
+  assert.deepEqual(voice.readRememberedCall(), { guildId: 'G1', channelId: 'chan-9' });
+});
+
+test('readRememberedCall returns null when nothing was remembered', () => {
+  assert.equal(voice.readRememberedCall(), null);
+});
+
+test('readRememberedCall returns null rather than throwing on a corrupt record', () => {
+  fsMod.writeFileSync(STATE_FILE, '{ not json');
+  assert.equal(voice.readRememberedCall(), null);
+});
+
+test('a call-ending leave forgets the call, so a restart cannot resurrect it', () => {
+  for (const reason of ['command', 'idle', 'yield', 'slot-in-use']) {
+    voice.rememberCall('G1', 'chan-9');
+    voice.sessions.set('G1', fakeSession({ guildId: 'G1' }));
+    voice.leave('G1', reason);
+    assert.equal(
+      voice.readRememberedCall(),
+      null,
+      `${reason} ends the call, so the record must be cleared`,
+    );
+  }
+});
+
+test('shutdown and pre-join PRESERVE the record — the two that would break the feature', () => {
+  // shutdown: index.js's SIGTERM handler leaves with exactly this reason, so
+  // clearing here would wipe the record on the very restart the feature exists
+  // for. pre-join: join() leaves with this at the top of every rejoin, so
+  // clearing would erase the record mid-rejoin.
+  for (const reason of ['shutdown', 'pre-join']) {
+    voice.rememberCall('G1', 'chan-9');
+    voice.sessions.set('G1', fakeSession({ guildId: 'G1' }));
+    voice.leave('G1', reason);
+    assert.deepEqual(
+      voice.readRememberedCall(),
+      { guildId: 'G1', channelId: 'chan-9' },
+      `${reason} must not forget the call`,
+    );
+  }
+});
+
+test('restoreCall no-ops when nothing was remembered', async () => {
+  const client = { guilds: { cache: new Map() } };
+  assert.equal(await voice.restoreCall(client), null);
+});
+
+test('restoreCall clears a record whose guild or channel is gone', async () => {
+  voice.rememberCall('G1', 'chan-9');
+  const client = { guilds: { cache: new Map() } };
+  assert.equal(await voice.restoreCall(client), null);
+  assert.equal(
+    voice.readRememberedCall(),
+    null,
+    'a permanently gone target must not be retried on every boot',
+  );
 });

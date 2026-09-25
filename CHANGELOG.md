@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 - MINOR version when you add functionality in a backwards-compatible manner, and
 - PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: restore a live voice call after a process restart. A restart is not a disconnect the running process can repair — it is gone before `stateChange` can fire — so the bot now writes the call it is in to `VOICE_STATE_PATH` (default `~/.local/state/discord-assistant/live-call.json`) and rejoins it at boot, after the leftover-connection eviction that removes the dead process's ghost. The record is cleared only on the leaves that genuinely end a call (`/leave`, idle, yield, slot-in-use) and deliberately preserved on `shutdown` — which is what a restart looks like from inside the process — and on a rejoin's own `pre-join` cleanup. Found 2026-09-25: a `launchctl kickstart -k` deploy dropped the operator's call and nothing brought it back.
+
 ## v0.51.1
 
 - fix: rejoin a voice call after any disconnect the operator did not ask for. The bot now leaves only on `/leave`, a yield to another identity, or the idle timeout; every other disconnect rejoins the same channel with bounded backoff (doubling from 2s, capped at 60s, max 5 attempts, then `voice: rejoin abandoned` at ERROR). The `stateChange` handler previously acted on `EndpointRemoved` alone and ignored every other reason, so a dropped call stayed dropped until somebody typed `/join` — the 2026-09-25 07:35:56Z incident. It also discards `n.reason`, which is now logged, because that is the one fact that tells a drop apart from a removal after the fact. Documents `VOICE_IDLE_RELEASE_MS` and adds `VOICE_REJOIN_BASE_MS`, `VOICE_REJOIN_MAX_DELAY_MS`, `VOICE_REJOIN_MAX_ATTEMPTS` to `local.env.example`.
