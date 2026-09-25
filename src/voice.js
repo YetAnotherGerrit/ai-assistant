@@ -213,11 +213,13 @@ class Session {
     this.ws = null;
     this.retry = null; // at most one outstanding reconnect
     // Armed when the last human leaves the channel, cleared on a rejoin or
-    // teardown. Fires `voiceIdleReleaseMs` later — if the channel is STILL
-    // empty, the session (and its s2s slot) is released. The handover bypasses
-    // this: a joining bot evicts an idle holder immediately via the shim's
-    // yield, never waiting out the grace window.
-    this.idleReleaseTimer = null;
+    // teardown. Fires `voiceEmptyRoomReleaseMs` later — if the channel is STILL
+    // empty, the session (and its s2s slot) is released. Named for the empty
+    // room, not for silence: the trigger is `humansIn === 0`, so talking to
+    // yourself indefinitely never releases it. The handover bypasses this: a
+    // joining bot evicts a holder whose room is empty immediately via the
+    // shim's yield, never waiting out the grace window.
+    this.emptyRoomReleaseTimer = null;
     // Set on the FIRST "slot already in use" refusal, cleared on a
     // successful (re)connect. Bounds how long the 'error' handler below
     // waits out a possible handover before giving up loudly — see
@@ -1254,31 +1256,32 @@ class Session {
   }
 
   /**
-   * Release the session after the idle grace window, if the channel is STILL
-   * empty. Called from noteVoiceState when the last human leaves; the timer is
-   * cleared by cancelIdleRelease() on any rejoin or teardown. The re-check
-   * at fire time is defensive — a channel that became unreadable (null) or
-   * repopulated without a voiceStateUpdate reaching us must keep the session.
+   * Release the session after the empty-room grace window, if the channel is
+   * STILL empty. Called from noteVoiceState when the last human leaves; the
+   * timer is cleared by cancelEmptyRoomRelease() on any rejoin or teardown. The
+   * re-check at fire time is defensive — a channel that became unreadable
+   * (null) or repopulated without a voiceStateUpdate reaching us must keep the
+   * session.
    */
-  scheduleIdleRelease() {
-    if (this.idleReleaseTimer) return; // already armed
-    this.idleReleaseTimer = setTimeout(() => {
-      this.idleReleaseTimer = null;
+  scheduleEmptyRoomRelease() {
+    if (this.emptyRoomReleaseTimer) return; // already armed
+    this.emptyRoomReleaseTimer = setTimeout(() => {
+      this.emptyRoomReleaseTimer = null;
       if (this.closed || humansIn(this.channel) !== 0) return;
-      log.info('voice: idle grace expired, releasing session', {
+      log.info('voice: empty-room grace expired, releasing session', {
         guildId: this.guildId,
         channel: this.channelId,
-        waitedMs: config.voiceIdleReleaseMs,
+        waitedMs: config.voiceEmptyRoomReleaseMs,
       });
-      leave(this.guildId, 'idle');
-    }, config.voiceIdleReleaseMs);
-    this.idleReleaseTimer.unref?.();
+      leave(this.guildId, 'empty-room');
+    }, config.voiceEmptyRoomReleaseMs);
+    this.emptyRoomReleaseTimer.unref?.();
   }
 
-  cancelIdleRelease() {
-    if (this.idleReleaseTimer) {
-      clearTimeout(this.idleReleaseTimer);
-      this.idleReleaseTimer = null;
+  cancelEmptyRoomRelease() {
+    if (this.emptyRoomReleaseTimer) {
+      clearTimeout(this.emptyRoomReleaseTimer);
+      this.emptyRoomReleaseTimer = null;
     }
   }
 
@@ -1287,7 +1290,7 @@ class Session {
     // said is silently lost.
     for (const t of this.flushTimers.values()) clearTimeout(t);
     this.flushTimers.clear();
-    this.cancelIdleRelease();
+    this.cancelEmptyRoomRelease();
     if (this.retry) {
       clearTimeout(this.retry);
       this.retry = null;
@@ -1338,7 +1341,7 @@ async function join(channel) {
     const session = sessions.get(channel.guild.id);
     if (!session || session.conn !== conn) return;
     // No `leaveReason` means nobody asked to leave. That is the whole test:
-    // /leave, the idle timeout and a yield all go through `leave()` and are
+    // /leave, the empty-room timeout and a yield all go through `leave()` and are
     // therefore exempt, and every other disconnect rejoins.
     //
     // This replaces the previous behaviour, which released the session on
@@ -1500,7 +1503,7 @@ function rejoinDelayMs(attempt) {
  * Rejoin a call after a disconnect nobody asked for.
  *
  * The operator's contract (2026-09-25): the bot leaves a voice channel only on
- * `/leave`, an idle timeout, or a yield to another identity — every other
+ * `/leave`, an empty-room timeout, or a yield to another identity — every other
  * disconnect rejoins the same channel. Before this, `stateChange` acted on
  * exactly one reason (`EndpointRemoved`) and released the session, and every
  * other disconnect was logged and ignored, so a dropped call stayed dropped
@@ -1582,7 +1585,7 @@ const VOICE_STATE_PATH = config.voiceStatePath || defaultVoiceStatePath();
 
 /**
  * The leave reasons that end a call for good: the operator asked, the channel
- * went idle, or another identity took the single s2s slot.
+ * left an empty room, or another identity took the single s2s slot.
  *
  * Only these clear the remembered call. Every other reason PRESERVES it, and
  * `shutdown` is the load-bearing one — index.js's SIGTERM handler leaves with
@@ -1595,7 +1598,7 @@ const VOICE_STATE_PATH = config.voiceStatePath || defaultVoiceStatePath();
  */
 const CALL_ENDING_REASONS = new Set([
   'command',
-  'idle',
+  'empty-room',
   'yield',
   'slot-in-use',
   // Another voice bot arrived. Only one bot can hold the s2s slot, so this one
@@ -1610,7 +1613,7 @@ const CALL_ENDING_REASONS = new Set([
  *
  * A restart is not a disconnect the running code can act on — the process is
  * gone before `stateChange` can fire, and the replacement process has no memory
- * of the call. So honouring "the bot leaves only on /leave, an idle timeout, or
+ * of the call. So honouring "the bot leaves only on /leave, an empty-room timeout, or
  * a yield" across a restart means persisting the call and rejoining from it at
  * boot (see `restoreCall`). On 2026-09-25 a `launchctl kickstart -k` deploy
  * dropped the operator's call and nothing brought it back.
@@ -1680,7 +1683,7 @@ async function restoreCall(client) {
   // A record outlives the call it describes whenever the process died and was
   // not restarted for a while — a laptop shut overnight, a crash left for a
   // day. Rejoining an empty channel would park the bot there holding the single
-  // s2s slot until the idle timeout released it an hour later, which is exactly
+  // s2s slot until the empty-room timeout released it an hour later, which is exactly
   // the squatter shape that release exists to prevent. Only a definite 0 skips
   // the restore: `humansIn` returns null for an unreadable channel, and
   // skipping on unknown would let a cache that is not warm at clientReady
@@ -1710,7 +1713,7 @@ async function restoreCall(client) {
 /**
  * Leave a call. `reason` is diagnostics, not a branch: what decides whether a
  * disconnect is repaired is simply whether `leave()` was called at all. Every
- * intentional path — `/leave`, the idle timeout, a yield, shutdown — goes
+ * intentional path — `/leave`, the empty-room timeout, a yield, shutdown — goes
  * through here, and the `stateChange` handler rejoins only when no
  * `leaveReason` was ever set.
  *
@@ -1813,30 +1816,30 @@ function noteVoiceState(oldState, newState) {
 
   // The call is over when the last human leaves the channel — but not at once.
   // The session (and its s2s slot) survives a brief absence for
-  // `voiceIdleReleaseMs` (default 1h) so stepping away does not cost the
+  // `voiceEmptyRoomReleaseMs` (default 1h) so stepping away does not cost the
   // conversation, then releases if the channel is still empty — the exact
-  // shape of the 2026-08-22 outage, where an idle bot starved an active one
-  // for 3+ hours. A joining bot does NOT wait this out: the handover (shim
-  // yield) evicts an idle holder immediately. Runs before the transcript guard
-  // so it holds for calls with transcription off too; an unreadable channel
-  // (humansIn null) leaves the session where it is. The departing member's
-  // line is written first, while the session still exists.
+  // shape of the 2026-08-22 outage, where a bot holding an empty room starved
+  // an active one for 3+ hours. A joining bot does NOT wait this out: the
+  // handover (shim yield) evicts it immediately. Runs before the transcript
+  // guard so it holds for calls with transcription off too; an unreadable
+  // channel (humansIn null) leaves the session where it is. The departing
+  // member's line is written first, while the session still exists.
   if (humansIn(channel) === 0 && !is) {
     if (userId && name) session.names.set(userId, name);
     session.transcript?.writeText(name, '(left the channel)');
     log.info('voice: left', { user: name });
-    session.scheduleIdleRelease();
-    log.info('voice: channel empty, scheduling idle release', {
+    session.scheduleEmptyRoomRelease();
+    log.info('voice: channel empty, scheduling empty-room release', {
       guildId,
       channel: here,
-      graceMs: config.voiceIdleReleaseMs,
+      graceMs: config.voiceEmptyRoomReleaseMs,
     });
     return;
   }
-  // Someone rejoined (or a new human arrived) — the idle release is moot.
+  // Someone rejoined (or a new human arrived) — the empty-room release is moot.
   if (is) {
-    session.cancelIdleRelease();
-    log.debug('voice: arrival, cancelling idle release', { guildId, channel: here });
+    session.cancelEmptyRoomRelease();
+    log.debug('voice: arrival, cancelling empty-room release', { guildId, channel: here });
   }
 
   // A channel MOVE and a Discord-side KICK both bypass the `stateChange`
@@ -1855,7 +1858,7 @@ function noteVoiceState(oldState, newState) {
   // null, and the target is always `session.channelId`, the original.
   //
   // Placed AFTER the empty-channel block so a bot that leaves an EMPTY channel
-  // still follows the idle-release path — nobody is there to serve, and it
+  // still follows the empty-room release path — nobody is there to serve, and it
   // matches `restoreCall`'s `humansIn === 0` skip. Placed BEFORE the transcript
   // guard so a call with TRANSCRIBE off is repaired too.
   //

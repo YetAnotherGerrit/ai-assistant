@@ -139,3 +139,42 @@ test('slash commands register only in listed guilds', () => {
   assert.ok(config.registersSlashCommands('555'));
   assert.equal(config.registersSlashCommands('777'), false, 'unlisted guild gets no commands');
 });
+
+// The release timeout is named for an EMPTY ROOM, not for silence: the trigger
+// is `humansIn(channel) === 0`. The old name said "idle" and misled exactly that
+// way during the 2026-09-25 live run — the operator sat in the channel expecting
+// a silent release that could never fire while they were still present.
+test('the release timeout reads the empty-room name', () => {
+  delete process.env.VOICE_IDLE_RELEASE_MS;
+  process.env.VOICE_EMPTY_ROOM_RELEASE_MS = '12345';
+  delete require.cache[require.resolve('../src/config')];
+  assert.equal(require('../src/config').voiceEmptyRoomReleaseMs, 12345);
+  delete process.env.VOICE_EMPTY_ROOM_RELEASE_MS;
+});
+
+// Kept so an existing local.env that still sets the old name does not silently
+// fall back to the 1h default — a config that quietly stops applying is worse
+// than a rename.
+test('the old idle name is still honoured as a fallback', () => {
+  delete process.env.VOICE_EMPTY_ROOM_RELEASE_MS;
+  process.env.VOICE_IDLE_RELEASE_MS = '6789';
+  delete require.cache[require.resolve('../src/config')];
+  assert.equal(require('../src/config').voiceEmptyRoomReleaseMs, 6789);
+  delete process.env.VOICE_IDLE_RELEASE_MS;
+});
+
+test('the new empty-room name wins when both are set', () => {
+  process.env.VOICE_EMPTY_ROOM_RELEASE_MS = '111';
+  process.env.VOICE_IDLE_RELEASE_MS = '222';
+  delete require.cache[require.resolve('../src/config')];
+  assert.equal(require('../src/config').voiceEmptyRoomReleaseMs, 111);
+  delete process.env.VOICE_EMPTY_ROOM_RELEASE_MS;
+  delete process.env.VOICE_IDLE_RELEASE_MS;
+});
+
+test('the release timeout defaults to one hour with neither name set', () => {
+  delete process.env.VOICE_EMPTY_ROOM_RELEASE_MS;
+  delete process.env.VOICE_IDLE_RELEASE_MS;
+  delete require.cache[require.resolve('../src/config')];
+  assert.equal(require('../src/config').voiceEmptyRoomReleaseMs, 3600000);
+});
