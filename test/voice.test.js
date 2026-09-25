@@ -2118,7 +2118,7 @@ test('readRememberedCall returns null rather than throwing on a corrupt record',
 });
 
 test('a call-ending leave forgets the call, so a restart cannot resurrect it', () => {
-  for (const reason of ['command', 'idle', 'yield', 'slot-in-use']) {
+  for (const reason of ['command', 'idle', 'yield', 'slot-in-use', 'another-bot-joined']) {
     voice.rememberCall('G1', 'chan-9');
     voice.sessions.set('G1', fakeSession({ guildId: 'G1' }));
     voice.leave('G1', reason);
@@ -2336,5 +2336,111 @@ test('noteVoiceState returns the bot even with transcription off', () => {
     voice.rejoins.get(guild.id)?.attempts,
     1,
     'the repair sits before the transcript guard, so TRANSCRIBE=off still returns the bot',
+  );
+});
+
+// --- another voice bot joining (2026-09-25) ---------------------------------
+//
+// Only one bot can hold the s2s slot, so another voice bot arriving in this
+// channel means this one has to go. Operator: "join of another voice bot ...
+// should cause leave too ... because we only support one voice bot a time."
+// The leave must be INTENTIONAL — through `leave()`, with a call-ending reason
+// — or the rejoin paths above bring this bot straight back and the two bots
+// fight over the slot the rule exists to keep single.
+
+/** An ARRIVAL into the bot's channel: the member was elsewhere (or nowhere). */
+function arrivePair({ guild, member }) {
+  return {
+    old: { guildId: guild.id, guild, channelId: null, member },
+    next: { guildId: guild.id, guild, channelId: 'chan-A', member },
+  };
+}
+
+const otherBot = { id: 'other-bot', displayName: 'Other Assistant', user: { bot: true } };
+
+test('noteVoiceState leaves the call when another bot joins', () => {
+  const { channel, guild } = moveChannel({ humans: 1 });
+  const session = fakeNvsSession({ channel });
+  voice.sessions.set(guild.id, session);
+  const { old, next } = arrivePair({ guild, member: otherBot });
+
+  voice.noteVoiceState(old, next);
+
+  assert.equal(
+    session.leaveReason,
+    'another-bot-joined',
+    'another bot arriving must be an intentional leave, not a disconnect',
+  );
+  assert.equal(voice.sessions.has(guild.id), false, 'the session must be released');
+  assert.equal(
+    voice.rejoins.get(guild.id),
+    undefined,
+    'an intentional leave must not schedule a rejoin — otherwise the two bots fight for the slot',
+  );
+});
+
+test('another bot joining clears the persisted record, so a restart cannot resurrect the call', () => {
+  const { channel, guild } = moveChannel({ humans: 1 });
+  voice.rememberCall(guild.id, 'chan-A');
+  voice.sessions.set(guild.id, fakeNvsSession({ channel }));
+  const { old, next } = arrivePair({ guild, member: otherBot });
+
+  voice.noteVoiceState(old, next);
+
+  assert.equal(
+    voice.readRememberedCall(),
+    null,
+    'a restart must not restore a call this bot deliberately gave up',
+  );
+});
+
+test('noteVoiceState ignores this bot arriving in its own channel', () => {
+  const { channel, guild } = moveChannel({ humans: 1 });
+  const session = fakeNvsSession({ channel });
+  voice.sessions.set(guild.id, session);
+  const { old, next } = arrivePair({
+    guild,
+    member: { id: 'bot-1', displayName: 'Assistant', user: { bot: true } },
+  });
+
+  voice.noteVoiceState(old, next);
+
+  assert.equal(session.leaveReason, undefined, 'the bot must never leave on its own arrival');
+  assert.equal(voice.sessions.has(guild.id), true);
+});
+
+test('noteVoiceState ignores a human arriving', () => {
+  const { channel, guild } = moveChannel({ humans: 2 });
+  const session = fakeNvsSession({ channel });
+  voice.sessions.set(guild.id, session);
+  const { old, next } = arrivePair({
+    guild,
+    member: { id: 'human-1', displayName: 'Ben', user: { bot: false } },
+  });
+
+  voice.noteVoiceState(old, next);
+
+  assert.equal(session.leaveReason, undefined, 'a human arriving must never make the bot leave');
+  assert.equal(voice.sessions.has(guild.id), true);
+});
+
+test('an unreadable bot id cannot make the bot leave on its own arrival', () => {
+  // The fail-safe direction: `botId` unreadable means "cannot tell", which must
+  // leave the call alone rather than risk abandoning it on this bot's own join.
+  const { channel, guild } = moveChannel({ humans: 1 });
+  delete guild.members.me;
+  const session = fakeNvsSession({ channel });
+  voice.sessions.set(guild.id, session);
+  const { old, next } = arrivePair({
+    guild,
+    member: { id: 'bot-1', displayName: 'Assistant', user: { bot: true } },
+  });
+
+  voice.noteVoiceState(old, next);
+
+  assert.equal(
+    session.leaveReason,
+    undefined,
+    'an unreadable member list must fail safe, not abandon the call',
   );
 });

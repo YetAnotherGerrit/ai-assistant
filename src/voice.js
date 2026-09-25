@@ -1593,7 +1593,17 @@ const VOICE_STATE_PATH = config.voiceStatePath || defaultVoiceStatePath();
  * the same reason as `yield`: it is contention for the one s2s slot, and a
  * boot-time rejoin would fight the identity that won it.
  */
-const CALL_ENDING_REASONS = new Set(['command', 'idle', 'yield', 'slot-in-use']);
+const CALL_ENDING_REASONS = new Set([
+  'command',
+  'idle',
+  'yield',
+  'slot-in-use',
+  // Another voice bot arrived. Only one bot can hold the s2s slot, so this one
+  // gives it up — and a restart must NOT restore a call it deliberately left,
+  // or the two-bots-one-slot state the rule exists to prevent comes straight
+  // back on the next deploy.
+  'another-bot-joined',
+]);
 
 /**
  * Write down which call this process is in, so a restart can restore it.
@@ -1866,6 +1876,28 @@ function noteVoiceState(oldState, newState) {
       leftTo: newState.channelId ?? null,
     });
     scheduleRejoin(guildId, channel);
+  }
+
+  // Only one bot can hold the s2s slot, so another voice bot arriving in this
+  // channel means this one has to go. Operator, 2026-09-25: "join of another
+  // voice bot ... should cause leave too ... because we only support one voice
+  // bot a time." It is the same handover the shim's yield performs, observed
+  // here directly instead of requested from outside.
+  //
+  // An INTENTIONAL leave, not a disconnect: it goes through `leave()` so
+  // `leaveReason` is set and neither the `stateChange` handler nor the
+  // kick/move trigger above tries to bring this bot back — that is the whole
+  // point, since two bots in one call is the state being avoided. The reason is
+  // in CALL_ENDING_REASONS as well, so the persisted record is cleared and a
+  // later restart does not restore it either.
+  //
+  // `is` alone implies arrival: line 1788 returns when `was === is`. Guarded on
+  // `botId` so an unreadable member list cannot make this bot leave on its own
+  // arrival, and on `userId !== botId` for the same reason directly.
+  if (is && member?.user?.bot === true && botId && userId !== botId) {
+    log.info('voice: another bot joined, leaving', { guildId, channel: here, otherBot: name });
+    leave(guildId, 'another-bot-joined');
+    return;
   }
 
   if (!session.transcript) return;

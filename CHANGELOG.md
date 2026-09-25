@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 - MINOR version when you add functionality in a backwards-compatible manner, and
 - PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: leave the call when another voice bot joins the channel. Only one bot can hold the speech-to-speech slot, so a second one arriving means this bot has to go — the same handover the shim's yield performs, but observed directly in `noteVoiceState` instead of requested from outside. It is an intentional leave through `leave(guildId, 'another-bot-joined')`, so neither the `stateChange` handler nor the kick/move repair path tries to bring this bot back and the two do not fight over the slot; the reason is also in `CALL_ENDING_REASONS`, so the persisted restart-restore record is cleared and a later deploy cannot resurrect the call either. Logs `voice: another bot joined, leaving`. Guards on the bot's own id, so it never fires on this bot's own arrival, on a human arriving, or when the member list is unreadable — an unreadable `botId` fails safe by leaving the call alone rather than abandoning it.
+
 ## v0.51.3
 
 - fix: return to its own channel when the bot leaves it, whether moved or kicked. Neither is a disconnect: discord.js follows a move (`ready -> connecting -> ready`), and a Discord-side kick goes `ready -> signalling` and then nothing at all — so the `stateChange` handler never sees a `Disconnected` it could repair. Measured live 2026-09-25: after each, the bot sat outside its channel and nothing brought it back. `noteVoiceState` now treats the bot's own member no longer being in its channel as an unrequested leave and repairs it with the same bounded rejoin, logging `voice: bot left its channel, returning`. The target is always the original channel and the destination is never read, so a kick's null and a move's other channel are handled alike. It sits after the empty-channel block, so leaving an empty channel still follows the idle-release path, and before the transcript guard, so `TRANSCRIBE` off is repaired too.
