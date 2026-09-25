@@ -5,7 +5,6 @@ const {
   EndBehaviorType,
   entersState,
   VoiceConnectionStatus,
-  VoiceConnectionDisconnectReason,
   createAudioPlayer,
   createAudioResource,
   StreamType,
@@ -205,6 +204,11 @@ class Session {
     this.cancelled = false;
     this.subscribed = new Set();
     this.closed = false;
+    // Set by leave() to the reason it was called. Read by the stateChange
+    // handler, which rejoins only while this is still null — i.e. only when
+    // nobody asked to leave. See the leave contract in [[Discord Assistant
+    // Leaves the Voice Call Without Being Told To]].
+    this.leaveReason = null;
     this.ws = null;
     this.retry = null; // at most one outstanding reconnect
     // Armed when the last human leaves the channel, cleared on a rejoin or
@@ -921,7 +925,7 @@ class Session {
             config.assistantLabel,
             `(voice: left — slot in use elsewhere: ${reason})`,
           );
-          leave(this.guildId);
+          leave(this.guildId, 'slot-in-use');
           break;
         }
         // ONLY `response_failed` — the type `_on_response_failed` sends — is a
@@ -1265,7 +1269,7 @@ class Session {
         channel: this.channelId,
         waitedMs: config.voiceIdleReleaseMs,
       });
-      leave(this.guildId);
+      leave(this.guildId, 'idle');
     }, config.voiceIdleReleaseMs);
     this.idleReleaseTimer.unref?.();
   }
@@ -1307,7 +1311,7 @@ class Session {
 const sessions = new Map(); // guildId -> Session
 
 async function join(channel) {
-  leave(channel.guild.id);
+  leave(channel.guild.id, 'pre-join');
   const conn = joinVoiceChannel({
     channelId: channel.id,
     guildId: channel.guild.id,
@@ -1317,21 +1321,33 @@ async function join(channel) {
   });
   conn.on('stateChange', (o, n) => {
     log.info(`  voice: ${o.status} -> ${n.status}`);
-    // The server removed the bot from voice (kicked, or its channel was
-    // deleted) — it is now in no call, but the session and the s2s slot it
-    // holds survive until someone runs /leave. Release it here, like /leave
-    // would. Gated on EndpointRemoved (the null VOICE_SERVER_UPDATE endpoint,
-    // the "you are out of voice" signal) so a transient WS close the
-    // connection recovers from never tears down a healthy call; `sessions.has`
-    // guards the join window before the session is registered.
-    if (
-      n.status === VoiceConnectionStatus.Disconnected &&
-      n.reason === VoiceConnectionDisconnectReason.EndpointRemoved &&
-      sessions.has(channel.guild.id)
-    ) {
-      log.info('voice: removed from voice, releasing session', { reason: n.reason });
-      leave(channel.guild.id);
-    }
+    if (n.status !== VoiceConnectionStatus.Disconnected) return;
+
+    // The reason is the one fact that separates a drop worth repairing from a
+    // removal we cannot repair, and it was discarded here until 2026-09-25 —
+    // which is why the 07:35:56Z incident could not be diagnosed after the
+    // fact: "removed", "moved" and a bare socket close are indistinguishable
+    // without it.
+    log.info('voice: disconnected', { reason: n.reason, closeCode: n.closeCode ?? null });
+
+    // A superseded connection must not drive anything — the same guard the s2s
+    // `close` handler uses. A rejoin replaces `conn`, and the old socket's
+    // teardown arrives after the new session is already live. `!session` also
+    // covers the join window before the session is registered.
+    const session = sessions.get(channel.guild.id);
+    if (!session || session.conn !== conn) return;
+    // No `leaveReason` means nobody asked to leave. That is the whole test:
+    // /leave, the idle timeout and a yield all go through `leave()` and are
+    // therefore exempt, and every other disconnect rejoins.
+    //
+    // This replaces the previous behaviour, which released the session on
+    // EndpointRemoved and ignored every other reason. A server-side removal is
+    // now treated like any other disconnect: the operator's contract is that
+    // the assistant is present in the call unless they said otherwise, and a
+    // kick or a move is not them saying so. If the channel is gone the rejoin
+    // fails and is bounded by voiceRejoinMaxAttempts.
+    if (session.leaveReason) return;
+    scheduleRejoin(channel.guild.id, channel);
   });
   await entersState(conn, VoiceConnectionStatus.Ready, 30000);
 
@@ -1412,13 +1428,115 @@ async function join(channel) {
   // utterance, or the opening question of a private call is judged against a
   // gate that is still armed from whatever the last call left behind.
   await syncSolo(session, channel);
+  // The call is live, so any rejoin sequence that led here is finished and its
+  // attempt counter must not carry into the next disconnect.
+  cancelRejoin(channel.guild.id);
   log.info('voice: joined', { channel: channel.name, transcribing: Boolean(session.transcript) });
   return session;
 }
 
-function leave(guildId) {
+/**
+ * Auto-rejoin sequences, one per guild: `{ attempts, timer }`. Module-level
+ * rather than per-Session on purpose — a rejoin tears the session down and
+ * builds a new one, so a counter living on the old Session would restart at
+ * zero on every attempt and the bound would never be reached.
+ */
+const rejoins = new Map();
+
+/** End a guild's rejoin sequence. `join()` calls this once the call is live. */
+function cancelRejoin(guildId) {
+  const state = rejoins.get(guildId);
+  if (state?.timer) clearTimeout(state.timer);
+  rejoins.delete(guildId);
+}
+
+/**
+ * Backoff for the Nth rejoin attempt (1-based): doubling from
+ * `voiceRejoinBaseMs`, capped at `voiceRejoinMaxDelayMs`. Split out and
+ * exported so the sequence is assertable without waiting on real timers.
+ */
+function rejoinDelayMs(attempt) {
+  return Math.min(config.voiceRejoinBaseMs * 2 ** (attempt - 1), config.voiceRejoinMaxDelayMs);
+}
+
+/**
+ * Rejoin a call after a disconnect nobody asked for.
+ *
+ * The operator's contract (2026-09-25): the bot leaves a voice channel only on
+ * `/leave`, an idle timeout, or a yield to another identity — every other
+ * disconnect rejoins the same channel. Before this, `stateChange` acted on
+ * exactly one reason (`EndpointRemoved`) and released the session, and every
+ * other disconnect was logged and ignored, so a dropped call stayed dropped
+ * until somebody typed `/join`. That is the 2026-09-25 07:35:56Z incident: the
+ * bot left, nothing rejoined, and the operator found out by speaking into a
+ * channel with no bot in it.
+ *
+ * Backoff doubles from `voiceRejoinBaseMs`, capped at `voiceRejoinMaxDelayMs`,
+ * for at most `voiceRejoinMaxAttempts` attempts. On exhaustion the session is
+ * destroyed and `voice: rejoin abandoned` is logged at ERROR — a bot silently
+ * absent from a call is the exact symptom this exists to remove, so giving up
+ * has to be loud.
+ */
+function scheduleRejoin(guildId, channel) {
+  const state = rejoins.get(guildId) ?? { attempts: 0, timer: null };
+  rejoins.set(guildId, state);
+  if (state.timer) return; // one sequence at a time
+  state.attempts += 1;
+  if (state.attempts > config.voiceRejoinMaxAttempts) {
+    log.error('voice: rejoin abandoned', { guildId, attempts: state.attempts - 1 });
+    rejoins.delete(guildId);
+    leave(guildId, 'rejoin-abandoned');
+    return;
+  }
+  const delayMs = rejoinDelayMs(state.attempts);
+  log.info('voice: rejoining after an unrequested disconnect', {
+    guildId,
+    channelId: channel?.id,
+    attempt: state.attempts,
+    delayMs,
+  });
+  state.timer = setTimeout(() => {
+    state.timer = null;
+    // Re-resolve from the cache: the channel object captured at join time can
+    // be stale after a drop, and a deleted channel must fail loudly rather than
+    // rejoin something that no longer exists.
+    const target = channel?.guild?.channels?.cache?.get(channel.id) ?? channel;
+    if (!target) {
+      log.error('voice: rejoin abandoned — channel no longer exists', {
+        guildId,
+        channelId: channel?.id,
+      });
+      rejoins.delete(guildId);
+      leave(guildId, 'rejoin-abandoned');
+      return;
+    }
+    join(target).catch((e) => {
+      log.error('  voice: rejoin attempt failed', { attempt: state.attempts, error: e.message });
+      scheduleRejoin(guildId, target);
+    });
+  }, delayMs);
+  state.timer.unref?.();
+}
+
+/**
+ * Leave a call. `reason` is diagnostics, not a branch: what decides whether a
+ * disconnect is repaired is simply whether `leave()` was called at all. Every
+ * intentional path — `/leave`, the idle timeout, a yield, shutdown — goes
+ * through here, and the `stateChange` handler rejoins only when no
+ * `leaveReason` was ever set.
+ *
+ * `pre-join` is deliberately exempt from `cancelRejoin`: `join()` performs its
+ * own cleanup leave as the first step of a rejoin, and clearing the sequence
+ * there would reset the attempt counter on every retry and let a
+ * permanently-failing rejoin loop forever at attempt 1.
+ */
+function leave(guildId, reason = 'unspecified') {
+  if (reason !== 'pre-join') cancelRejoin(guildId);
   const s = sessions.get(guildId);
   if (s) {
+    // Set before `destroy()`: if that emits `stateChange` synchronously, the
+    // handler reads this while the session is still in `sessions`.
+    s.leaveReason = reason;
     s.destroy();
     sessions.delete(guildId);
     return true;
@@ -1761,7 +1879,7 @@ async function yieldVoice(newIdentity) {
       config.assistantLabel,
       `(voice: yielded to ${newIdentity || 'another identity'})`,
     );
-    leave(guildId);
+    leave(guildId, 'yield');
     left.push(channelId);
     log.info('voice: yielded call to another identity', { newIdentity, guildId, channelId });
   }
@@ -1839,6 +1957,14 @@ module.exports = {
   postToChannel,
   yieldVoice,
   rebindVoice,
+  // Exported for unit tests: the leave-reason contract and the auto-rejoin
+  // backoff are pure logic over `sessions`/`rejoins`, and the real triggers
+  // (a Discord socket dropping) cannot be produced in a unit test — see
+  // CLAUDE.md's "Verifying Voice Changes" for what still needs a live call.
+  scheduleRejoin,
+  cancelRejoin,
+  rejoinDelayMs,
+  rejoins,
   // Exported for unit tests to exercise Session.prototype.speak against a
   // fake ws (no real audio pipeline needed) — see test/voice.test.js.
   Session,

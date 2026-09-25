@@ -255,6 +255,14 @@ const config = {
   // handover bypasses this entirely — a joining bot evicts an idle holder
   // immediately via the shim's yield, never waiting out the grace window.
   voiceIdleReleaseMs: parseInt(process.env.VOICE_IDLE_RELEASE_MS || '3600000', 10),
+  // Auto-rejoin backoff after a disconnect nobody asked for — see
+  // scheduleRejoin in voice.js. Delays double from voiceRejoinBaseMs, capped at
+  // voiceRejoinMaxDelayMs, for at most voiceRejoinMaxAttempts attempts. The cap
+  // is not reached at the default 5 attempts (2+4+8+16+32s); it exists so
+  // raising the attempt count cannot produce an unbounded wait.
+  voiceRejoinBaseMs: parseInt(process.env.VOICE_REJOIN_BASE_MS || '2000', 10),
+  voiceRejoinMaxDelayMs: parseInt(process.env.VOICE_REJOIN_MAX_DELAY_MS || '60000', 10),
+  voiceRejoinMaxAttempts: parseInt(process.env.VOICE_REJOIN_MAX_ATTEMPTS || '5', 10),
   // How long a spoken turn may go without producing audio before the bot
   // treats the wait as a stall worth speaking into. The mic turn's clock
   // starts when the user stops speaking (`input_audio_buffer.speech_stopped`),

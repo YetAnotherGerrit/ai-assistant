@@ -67,7 +67,7 @@ async function handleVoiceCommand(msg, client, cmd) {
   const voice = require('./voice');
   if (cmd === 'leave') {
     const guildId = msg.guild?.id ?? [...client.guilds.cache.keys()][0];
-    const left = guildId ? voice.leave(guildId) : false;
+    const left = guildId ? voice.leave(guildId, 'command') : false;
     log.info('voice command via text', { cmd, ok: left });
     return safeVoiceReply(msg, left ? 'Left the voice channel.' : 'I am not in a voice channel.');
   }

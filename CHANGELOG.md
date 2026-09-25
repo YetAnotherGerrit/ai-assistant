@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 - MINOR version when you add functionality in a backwards-compatible manner, and
 - PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: rejoin a voice call after any disconnect the operator did not ask for. The bot now leaves only on `/leave`, a yield to another identity, or the idle timeout; every other disconnect rejoins the same channel with bounded backoff (doubling from 2s, capped at 60s, max 5 attempts, then `voice: rejoin abandoned` at ERROR). The `stateChange` handler previously acted on `EndpointRemoved` alone and ignored every other reason, so a dropped call stayed dropped until somebody typed `/join` — the 2026-09-25 07:35:56Z incident. It also discards `n.reason`, which is now logged, because that is the one fact that tells a drop apart from a removal after the fact. Documents `VOICE_IDLE_RELEASE_MS` and adds `VOICE_REJOIN_BASE_MS`, `VOICE_REJOIN_MAX_DELAY_MS`, `VOICE_REJOIN_MAX_ATTEMPTS` to `local.env.example`.
+
 ## v0.51.0
 
 - feat: expose the claude-shim to the laptop over the LAN so the speech-to-speech loop can POST a turn and get the answer back. The return path had no route at all: the shim was ClusterIP-only and the `sc-assistant` NetworkPolicy admits neither Traefik nor the laptop. Adds an Ingress (`claude-shim.<env>.nuke.benjamin-borbe.de`) plus the NetworkPolicy ingress rule that lets Traefik reach the pod on 8080. Deploy envs gain `ENV_SUFFIX` so one manifest serves both clusters.
