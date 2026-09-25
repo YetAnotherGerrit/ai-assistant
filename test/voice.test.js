@@ -2043,3 +2043,39 @@ test('scheduleRejoin abandons loudly once the attempt budget is spent', () => {
     config.voiceRejoinMaxAttempts = savedMax;
   }
 });
+
+test('a non-finite base delay falls back to the documented default', () => {
+  const saved = config.voiceRejoinBaseMs;
+  config.voiceRejoinBaseMs = NaN; // what `parseInt('abc', 10)` yields
+  try {
+    // Without the guard this is NaN, and `setTimeout(fn, NaN)` fires at once.
+    assert.equal(voice.rejoinDelayMs(1), 2000);
+  } finally {
+    config.voiceRejoinBaseMs = saved;
+  }
+});
+
+test('a non-finite attempt budget still abandons — NaN must not mean "retry forever"', () => {
+  const savedMax = config.voiceRejoinMaxAttempts;
+  config.voiceRejoinMaxAttempts = NaN;
+  try {
+    const session = fakeSession({ guildId: 'G1' });
+    voice.sessions.set('G1', session);
+
+    for (let i = 0; i < 5; i += 1) {
+      voice.scheduleRejoin('G1', fakeChannel());
+      const state = voice.rejoins.get('G1');
+      clearTimeout(state.timer);
+      state.timer = null;
+    }
+    assert.equal(voice.rejoins.get('G1').attempts, 5);
+
+    // `attempts > NaN` is always false, so without the guard this call arms an
+    // immediate retry instead of abandoning, and the loop never stops.
+    voice.scheduleRejoin('G1', fakeChannel());
+    assert.equal(voice.rejoins.has('G1'), false, 'NaN must fall back to the default budget');
+    assert.equal(session.leaveReason, 'rejoin-abandoned');
+  } finally {
+    config.voiceRejoinMaxAttempts = savedMax;
+  }
+});

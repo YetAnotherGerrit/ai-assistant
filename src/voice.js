@@ -1440,6 +1440,15 @@ async function join(channel) {
  * rather than per-Session on purpose — a rejoin tears the session down and
  * builds a new one, so a counter living on the old Session would restart at
  * zero on every attempt and the bound would never be reached.
+ *
+ * Module-level mutable state is not the injected-dependency shape
+ * `node/architecture/inject-dependencies` prefers, and it is kept deliberately:
+ * `join`, `leave` and `scheduleRejoin` are plain module functions rather than a
+ * factory, so there is no seam to inject through — and `sessions` directly
+ * above already sets this pattern, with the same export-for-tests contract.
+ * Threading a Map through all three would refactor the module's whole surface
+ * for no test that cannot already be written: the suite clears this in
+ * `beforeEach`, exactly as it does `sessions`.
  */
 const rejoins = new Map();
 
@@ -1451,12 +1460,36 @@ function cancelRejoin(guildId) {
 }
 
 /**
+ * Documented defaults for the auto-rejoin knobs, used when the env parse
+ * produced something that is not a finite number. Kept here rather than in
+ * config.js so that module stays pure data.
+ */
+const REJOIN_DEFAULTS = { baseMs: 2000, maxDelayMs: 60000, maxAttempts: 5 };
+
+/**
+ * Read a numeric config value, falling back to its default when it is not a
+ * finite number.
+ *
+ * `parseInt('abc')` is `NaN`, and NaN propagates into BOTH halves of the retry
+ * loop: `setTimeout(fn, NaN)` fires immediately, and `attempts > NaN` is always
+ * false so the budget is never spent. Together those are an unbounded
+ * immediate-retry loop hammering Discord — the exact class of bug this module's
+ * `voiceSlotRetryDeadlineMs` comment already warns must not come back, so the
+ * parse is guarded rather than trusted.
+ */
+function rejoinNumber(value, fallback) {
+  return Number.isFinite(value) ? value : fallback;
+}
+
+/**
  * Backoff for the Nth rejoin attempt (1-based): doubling from
  * `voiceRejoinBaseMs`, capped at `voiceRejoinMaxDelayMs`. Split out and
  * exported so the sequence is assertable without waiting on real timers.
  */
 function rejoinDelayMs(attempt) {
-  return Math.min(config.voiceRejoinBaseMs * 2 ** (attempt - 1), config.voiceRejoinMaxDelayMs);
+  const base = rejoinNumber(config.voiceRejoinBaseMs, REJOIN_DEFAULTS.baseMs);
+  const cap = rejoinNumber(config.voiceRejoinMaxDelayMs, REJOIN_DEFAULTS.maxDelayMs);
+  return Math.min(base * 2 ** (attempt - 1), cap);
 }
 
 /**
@@ -1482,7 +1515,8 @@ function scheduleRejoin(guildId, channel) {
   rejoins.set(guildId, state);
   if (state.timer) return; // one sequence at a time
   state.attempts += 1;
-  if (state.attempts > config.voiceRejoinMaxAttempts) {
+  const maxAttempts = rejoinNumber(config.voiceRejoinMaxAttempts, REJOIN_DEFAULTS.maxAttempts);
+  if (state.attempts > maxAttempts) {
     log.error('voice: rejoin abandoned', { guildId, attempts: state.attempts - 1 });
     rejoins.delete(guildId);
     leave(guildId, 'rejoin-abandoned');
@@ -1510,6 +1544,13 @@ function scheduleRejoin(guildId, channel) {
       leave(guildId, 'rejoin-abandoned');
       return;
     }
+    // A rejoin is a full `join()`, deliberately: it is exactly what the
+    // operator's manual `/join` did before this existed, so it rebuilds the
+    // voice connection AND the s2s socket, starts a fresh transcript session,
+    // and clears the per-call wake/transcribe overrides. That is heavier than
+    // repairing the voice leg alone, but it reuses the one path that is known
+    // to work end to end, and it is strictly better than the call staying
+    // dropped. If the transcript split ever matters, that is a separate change.
     join(target).catch((e) => {
       log.error('  voice: rejoin attempt failed', { attempt: state.attempts, error: e.message });
       scheduleRejoin(guildId, target);
