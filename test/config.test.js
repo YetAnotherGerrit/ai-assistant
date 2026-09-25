@@ -140,6 +140,28 @@ test('slash commands register only in listed guilds', () => {
   assert.equal(config.registersSlashCommands('777'), false, 'unlisted guild gets no commands');
 });
 
+test('slash command mode defaults to multi, the legacy surface', () => {
+  delete process.env.SLASH_COMMAND_MODE;
+  delete require.cache[require.resolve('../src/config')];
+  assert.equal(require('../src/config').slashCommandMode, 'multi');
+});
+
+test('slash command mode accepts single, case- and space-insensitively', () => {
+  process.env.SLASH_COMMAND_MODE = ' Single ';
+  delete require.cache[require.resolve('../src/config')];
+  assert.equal(require('../src/config').slashCommandMode, 'single');
+  delete process.env.SLASH_COMMAND_MODE;
+});
+
+// A typo must not silently register the shape the operator did not ask for.
+test('an unknown slash command mode fails startup', () => {
+  process.env.SLASH_COMMAND_MODE = 'singel';
+  delete require.cache[require.resolve('../src/config')];
+  assert.throws(() => require('../src/config'), /SLASH_COMMAND_MODE/);
+  delete process.env.SLASH_COMMAND_MODE;
+  delete require.cache[require.resolve('../src/config')];
+});
+
 // The release timeout is named for an EMPTY ROOM, not for silence: the trigger
 // is `humansIn(channel) === 0`. The old name said "idle" and misled exactly that
 // way during the 2026-09-25 live run — the operator sat in the channel expecting

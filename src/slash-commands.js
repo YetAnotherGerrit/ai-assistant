@@ -1,9 +1,22 @@
 'use strict';
 
-const { SlashCommandBuilder, SlashCommandSubcommandBuilder } = require('discord.js');
+const {
+  SlashCommandBuilder,
+  SlashCommandSubcommandBuilder,
+  PermissionFlagsBits,
+} = require('discord.js');
 
 /**
- * The slash commands this instance advertises, as subcommands of one `/ben`.
+ * The slash commands this instance advertises, in one of two shapes chosen by
+ * SLASH_COMMAND_MODE (see config.js):
+ *
+ * - `multi` (the legacy default): every command is its own top-level entry,
+ *   hidden behind ADMIN_PERMISSION.
+ * - `single`: one `/ben` command carrying the same commands as subcommands,
+ *   visible to every member.
+ *
+ * Both shapes are built from ONE list, so the two cannot drift into offering
+ * different commands.
  *
  * Its own module because "which commands exist" is a decision worth testing,
  * and index.js logs in at require time so a test cannot reach anything defined
@@ -26,31 +39,50 @@ const VOICE_DISABLED_REPLY =
   'Voice is disabled on this instance — it runs text-only, so there is no voice channel to join.';
 
 /**
- * The one top-level command this instance registers. Everything else is a
+ * The one top-level command `single` mode registers. Everything else is a
  * subcommand of it, so the bot occupies a single entry in the guild's command
  * picker instead of a dozen generic names (`/new`, `/status`, `/mode`) that
  * collide with every other bot on the server.
  */
 const COMMAND_NAME = 'ben';
 
-function buildCommands({ voiceEnabled }) {
+/**
+ * The permission a member needs before Discord will SHOW the `multi`-mode
+ * commands.
+ *
+ * ManageGuild rather than ManageMessages: moderators routinely hold the latter,
+ * and every command here drives a Claude Code session with vault and repository
+ * access — a moderator is not an operator. Guild owners bypass permission checks
+ * entirely, so the owner always sees them without holding anything explicitly.
+ *
+ * Note what this is NOT: Discord's gate is permission-based, so it cannot
+ * express "these user ids". A member holding ManageGuild sees the commands
+ * whether or not they are in ADMIN_USER_IDS — which is why index.js still
+ * checks config.isAdmin before acting. Hiding is a UX affordance; the id check
+ * is the actual authorisation.
+ */
+const ADMIN_PERMISSION = PermissionFlagsBits.ManageGuild;
+
+function buildCommands({ voiceEnabled, mode = 'multi' }) {
+  const single = mode === 'single';
+  // The two builders share the setName/setDescription/addStringOption surface,
+  // so the list below is written once and only the wrapper differs.
+  const Builder = single ? SlashCommandSubcommandBuilder : SlashCommandBuilder;
   const subcommands = [];
 
   if (voiceEnabled) {
     subcommands.push(
-      new SlashCommandSubcommandBuilder()
+      new Builder()
         .setName('join')
         .setDescription('Join the voice channel you are in and start listening'),
-      new SlashCommandSubcommandBuilder()
-        .setName('leave')
-        .setDescription('Stop listening and leave the voice channel'),
+      new Builder().setName('leave').setDescription('Stop listening and leave the voice channel'),
       // Voice-only for the same reason join/leave are: the wake phrase gates
       // voice turns and nothing else, so on a text-only instance the command
       // would advertise control over a gate that never runs.
       //
       // The option is NOT required — invoking it bare is the query form, which
       // is the first thing you want mid-call ("is the gate on right now?").
-      new SlashCommandSubcommandBuilder()
+      new Builder()
         .setName('wakephrase')
         .setDescription('Show or change whether the wake phrase is required in this call')
         .addStringOption((o) =>
@@ -69,7 +101,7 @@ function buildCommands({ voiceEnabled }) {
       // /wakephrase it does not need a live call — the flag lives on the shim,
       // keyed per conversation, and can be set any time from the call's text
       // chat (bare invocation is the query form).
-      new SlashCommandSubcommandBuilder()
+      new Builder()
         .setName('interrupt')
         .setDescription('Show or change whether speaking over me mid-turn interrupts the answer')
         .addStringOption((o) =>
@@ -93,7 +125,7 @@ function buildCommands({ voiceEnabled }) {
       // value: a fresh call falls back to it because `join` clears any stale
       // override, so the two options on|off plus the bare query form are the
       // whole surface.
-      new SlashCommandSubcommandBuilder()
+      new Builder()
         .setName('transcribe')
         .setDescription('Show or change whether this call is being written down')
         .addStringOption((o) =>
@@ -117,29 +149,27 @@ function buildCommands({ voiceEnabled }) {
       // startup), but acting on it does require one: the playback it stops
       // lives on a live Session, so a call that is not up has nothing to
       // cancel and says so.
-      new SlashCommandSubcommandBuilder()
-        .setName('cancel')
-        .setDescription('Stop the reply I am currently speaking'),
+      new Builder().setName('cancel').setDescription('Stop the reply I am currently speaking'),
     );
   }
 
   subcommands.push(
-    new SlashCommandSubcommandBuilder()
+    new Builder()
       .setName('status')
       .setDescription('Health of the bot, endpoint, speech-to-speech and transcripts'),
     // These two had working handlers for weeks and were unreachable: a
     // handler is not a command until it is in this array.
-    new SlashCommandSubcommandBuilder()
+    new Builder()
       .setName('new')
       .setDescription('Start a fresh Claude Code session for this conversation'),
-    new SlashCommandSubcommandBuilder()
+    new Builder()
       .setName('sessions')
       .setDescription('List Claude Code sessions, and transcripts you can switch to'),
-    new SlashCommandSubcommandBuilder()
+    new Builder()
       .setName('switch')
       .setDescription('Point this conversation at an existing Claude Code session')
       .addStringOption((o) =>
-        o.setName('id').setDescription('Session id from /ben sessions').setRequired(true),
+        o.setName('id').setDescription('Session id from sessions').setRequired(true),
       ),
     // The /mode back-edge: a slash-command surface for the SAME per-key
     // switches the spoken instruction flips. Three choices, all explicit — a
@@ -149,7 +179,7 @@ function buildCommands({ voiceEnabled }) {
     // aliases (an `off` would be ambiguous on a command that sets a pair of
     // flags, and the default is reachable by naming `voice-text`). The option
     // is NOT required: bare /mode is the query form.
-    new SlashCommandSubcommandBuilder()
+    new Builder()
       .setName('mode')
       .setDescription('Show or set how this conversation answers: spoken, written, or both')
       .addStringOption((o) =>
@@ -164,8 +194,16 @@ function buildCommands({ voiceEnabled }) {
       ),
   );
 
-  // Deliberately NO setDefaultMemberPermissions: the command is visible to
-  // every member of the guild. Visibility is not authorisation — index.js still
+  if (!single) {
+    // Applied to every command, not a subset: the whole slash surface is
+    // session and voice control, and there is no command here an ordinary user
+    // should reach. The mention surface is what they get, and it is not built
+    // here.
+    return subcommands.map((c) => c.setDefaultMemberPermissions(ADMIN_PERMISSION).toJSON());
+  }
+
+  // Deliberately NO setDefaultMemberPermissions: /ben is visible to every
+  // member of the guild. Visibility is not authorisation — index.js still
   // checks config.isAllowed and config.isAdmin before acting on any subcommand,
   // so a member outside ADMIN_USER_IDS sees /ben and is refused on the wire.
   const ben = new SlashCommandBuilder()
@@ -175,4 +213,25 @@ function buildCommands({ voiceEnabled }) {
   return [ben.toJSON()];
 }
 
-module.exports = { buildCommands, VOICE_DISABLED_REPLY, COMMAND_NAME };
+/**
+ * Which command an interaction names, in this instance's mode — or null when
+ * it arrived in the OTHER shape.
+ *
+ * Null is not hypothetical: Discord keeps a guild's previous command list until
+ * the new one is PUT, so an instance restarted into the other mode can still
+ * receive the old shape for a moment.
+ */
+function commandFor(interaction, mode) {
+  if (mode === 'single') {
+    return interaction.commandName === COMMAND_NAME ? interaction.options.getSubcommand() : null;
+  }
+  return interaction.commandName === COMMAND_NAME ? null : interaction.commandName;
+}
+
+module.exports = {
+  buildCommands,
+  commandFor,
+  VOICE_DISABLED_REPLY,
+  COMMAND_NAME,
+  ADMIN_PERMISSION,
+};

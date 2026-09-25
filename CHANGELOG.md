@@ -10,7 +10,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
-- feat: bundle every slash command under a single `/ben` command as subcommands (`/ben join`, `/ben status`, `/ben mode`, …) instead of a dozen generic top-level names that collide with other bots, and make it visible to every member of the guild — the `ManageGuild` default-member-permission gate is gone. Authorisation is unchanged: `ALLOWED_USER_IDS` and `ADMIN_USER_IDS` are still checked on every invocation, so a member outside them sees `/ben` and is refused. An old top-level command still cached by a guild is answered with a pointer to `/ben`.
+- feat: add `SLASH_COMMAND_MODE`. `multi` (the default) keeps the legacy surface unchanged: every command top-level, hidden behind `ManageGuild`. `single` bundles them under one `/ben` command as subcommands (`/ben join`, `/ben status`, `/ben mode`, …) instead of a dozen generic names that collide with other bots, and makes `/ben` visible to every member of the guild. Authorisation is identical in both modes: `ALLOWED_USER_IDS` and `ADMIN_USER_IDS` are checked on every invocation. A command in the other mode's shape, still cached from the guild's previous list, is answered with a pointer to the current one. An unknown mode fails startup rather than guessing.
 
 ## v0.51.5
 

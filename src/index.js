@@ -6,7 +6,12 @@ const config = require('./config');
 const voice = require('./voice');
 const text = require('./text');
 const { sessionKeyFor, setMode, setInterrupt, setTranscribe, getVoiceState } = require('./llm');
-const { buildCommands, VOICE_DISABLED_REPLY, COMMAND_NAME } = require('./slash-commands');
+const {
+  buildCommands,
+  commandFor,
+  VOICE_DISABLED_REPLY,
+  COMMAND_NAME,
+} = require('./slash-commands');
 const log = require('./log');
 const { startHealthServer, isReady } = require('./health');
 const gchat = require('./gchat');
@@ -59,7 +64,10 @@ if (config.gchatEnabled) {
   }
 }
 
-const commands = buildCommands({ voiceEnabled: config.voiceEnabled });
+const commands = buildCommands({
+  voiceEnabled: config.voiceEnabled,
+  mode: config.slashCommandMode,
+});
 
 const client = new Client({
   intents: [
@@ -168,24 +176,28 @@ client.on('interactionCreate', async (i) => {
   });
   if (!i.isChatInputCommand()) return;
 
-  // Everything is a subcommand of /ben. Anything else is a stale entry from a
-  // guild list registered before the bundling — Discord keeps a guild's old
-  // list until the new one is PUT — and is answered rather than left hanging.
-  if (i.commandName !== COMMAND_NAME) {
+  // A command in the other mode's shape is a stale entry from the guild's
+  // previous list, and is answered rather than left hanging.
+  const cmd = commandFor(i, config.slashCommandMode);
+  if (cmd === null) {
     return i.reply({
-      content: `That command is gone — use \`/${COMMAND_NAME}\` instead.`,
+      content:
+        config.slashCommandMode === 'single'
+          ? `That command is gone — use \`/${COMMAND_NAME}\` instead.`
+          : `\`/${COMMAND_NAME}\` is gone — its subcommands are top-level commands here.`,
       flags: MessageFlags.Ephemeral,
     });
   }
-  const cmd = i.options.getSubcommand();
 
   if (!config.isAllowed(i.user.id)) {
     log.warn('slash command dropped', { command: cmd, user: i.user.tag, id: i.user.id });
     return i.reply({ content: 'Not authorised.', flags: MessageFlags.Ephemeral });
   }
 
-  // The authorisation. /ben is visible to every member of the guild (no
-  // setDefaultMemberPermissions), so this check — not Discord's picker — is
+  // The authorisation. In `multi` mode Discord hides the commands from members
+  // without ManageGuild, but hiding is a client affordance: a ManageGuild
+  // holder outside ADMIN_USER_IDS still sees them. In `single` mode /ben is
+  // visible to everyone. Either way this check — not Discord's picker — is
   // what keeps session and voice control to ADMIN_USER_IDS.
   if (!config.isAdmin(i.user.id)) {
     log.warn('slash command refused — not an admin', {
