@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 - MINOR version when you add functionality in a backwards-compatible manner, and
 - PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: return to its own channel when the bot leaves it, whether moved or kicked. Neither is a disconnect: discord.js follows a move (`ready -> connecting -> ready`), and a Discord-side kick goes `ready -> signalling` and then nothing at all — so the `stateChange` handler never sees a `Disconnected` it could repair. Measured live 2026-09-25: after each, the bot sat outside its channel and nothing brought it back. `noteVoiceState` now treats the bot's own member no longer being in its channel as an unrequested leave and repairs it with the same bounded rejoin, logging `voice: bot left its channel, returning`. The target is always the original channel and the destination is never read, so a kick's null and a move's other channel are handled alike. It sits after the empty-channel block, so leaving an empty channel still follows the idle-release path, and before the transcript guard, so `TRANSCRIBE` off is repaired too.
+
 ## v0.51.2
 
 - fix: restore a live voice call after a process restart. A restart is not a disconnect the running process can repair — it is gone before `stateChange` can fire — so the bot now writes the call it is in to `VOICE_STATE_PATH` (default `~/.local/state/discord-assistant/live-call-<identity>.json`; the identity is in the name because several bots share one `$HOME`) and rejoins it at boot, after the leftover-connection eviction that removes the dead process's ghost, and only when somebody is still in the channel — a record outlives the call it describes. The record is cleared only on the leaves that genuinely end a call (`/leave`, idle, yield, slot-in-use) and deliberately preserved on `shutdown` — which is what a restart looks like from inside the process — and on a rejoin's own `pre-join` cleanup. Found 2026-09-25: a `launchctl kickstart -k` deploy dropped the operator's call and nothing brought it back.

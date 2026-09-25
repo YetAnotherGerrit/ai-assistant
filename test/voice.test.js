@@ -2198,3 +2198,143 @@ test('restoreCall clears the record when the channel is empty — a stale call i
     'rejoining an empty channel would park the bot there holding the s2s slot',
   );
 });
+
+// --- the bot leaving its channel is not a disconnect (2026-09-25) -----------
+//
+// Two shapes bypass `stateChange` entirely, neither producing a `Disconnected`
+// it could repair: a MOVE, which the library follows (`ready -> connecting ->
+// ready`), and a KICK, which goes `ready -> signalling` and then nothing at
+// all. Measured live: after each, the bot sat outside its channel and nothing
+// brought it back. The kick is the likelier real-world cause of the incident
+// this module exists to fix.
+//
+// Both share one signal — the bot's own member is no longer in
+// `session.channelId` — and both are repaired by the same bounded rejoin into
+// the ORIGINAL channel. Nothing reads the destination, so a kick's null is as
+// valid an input as a move's other channel.
+
+/** A channel + guild carrying the bot's own member id, as the real one does. */
+function moveChannel({ humans = 1, botId = 'bot-1' } = {}) {
+  const users = Array.from({ length: humans }, () => ({ user: { bot: false } }));
+  const channel = { members: fakeMembers(users) };
+  const guild = {
+    id: 'guild-nvs',
+    channels: { cache: { get: () => channel } },
+    members: { me: { id: botId } },
+  };
+  // The real channel object carries its guild; noteVoiceState reads
+  // `channel.guild.members.me` to tell the bot apart from a human.
+  channel.guild = guild;
+  return { channel, guild };
+}
+
+/** A MOVE, not a leave: the member stays in voice but lands elsewhere. */
+function movePair({ guild, member }) {
+  return {
+    old: { guildId: guild.id, guild, channelId: 'chan-A', member },
+    next: { guildId: guild.id, guild, channelId: 'chan-B', member },
+  };
+}
+
+test('noteVoiceState returns the bot to its own channel after a move', () => {
+  const { channel, guild } = moveChannel({ humans: 1 });
+  voice.sessions.set(guild.id, fakeNvsSession({ channel }));
+  const { old, next } = movePair({ guild, member: { id: 'bot-1', displayName: 'Assistant' } });
+
+  voice.noteVoiceState(old, next);
+
+  assert.equal(
+    voice.rejoins.get(guild.id)?.attempts,
+    1,
+    'a move out of its channel must schedule the same bounded rejoin a disconnect does',
+  );
+});
+
+/** A KICK: the bot is out of voice entirely, so the destination is null. */
+function kickPair({ guild, member }) {
+  return {
+    old: { guildId: guild.id, guild, channelId: 'chan-A', member },
+    next: { guildId: guild.id, guild, channelId: null, member },
+  };
+}
+
+test('noteVoiceState returns the bot after a Discord-side kick', () => {
+  // The primary case: a kick goes `ready -> signalling` and then nothing, so
+  // the `stateChange` handler never fires and this is the only repair path.
+  const { channel, guild } = moveChannel({ humans: 1 });
+  voice.sessions.set(guild.id, fakeNvsSession({ channel }));
+  const { old, next } = kickPair({ guild, member: { id: 'bot-1', displayName: 'Assistant' } });
+
+  voice.noteVoiceState(old, next);
+
+  assert.equal(
+    voice.rejoins.get(guild.id)?.attempts,
+    1,
+    'a kick must schedule a rejoin of the ORIGINAL channel — the target is never read from newState',
+  );
+});
+
+test('noteVoiceState ignores a human leaving the channel', () => {
+  const { channel, guild } = moveChannel({ humans: 1 });
+  voice.sessions.set(guild.id, fakeNvsSession({ channel }));
+  const { old, next } = kickPair({ guild, member: { id: 'u1', displayName: 'Uno' } });
+
+  voice.noteVoiceState(old, next);
+
+  assert.equal(voice.rejoins.has(guild.id), false, 'a human disconnecting is not the bot leaving');
+});
+
+test('noteVoiceState ignores a human moving between channels', () => {
+  const { channel, guild } = moveChannel({ humans: 1 });
+  voice.sessions.set(guild.id, fakeNvsSession({ channel }));
+  const { old, next } = movePair({ guild, member: { id: 'u1', displayName: 'Uno' } });
+
+  voice.noteVoiceState(old, next);
+
+  assert.equal(voice.rejoins.has(guild.id), false, 'only the bot being moved is our business');
+});
+
+test('noteVoiceState does not fight an intentional leave', () => {
+  const { channel, guild } = moveChannel({ humans: 1 });
+  const session = fakeNvsSession({ channel });
+  session.leaveReason = 'command';
+  voice.sessions.set(guild.id, session);
+  const { old, next } = movePair({ guild, member: { id: 'bot-1', displayName: 'Assistant' } });
+
+  voice.noteVoiceState(old, next);
+
+  assert.equal(voice.rejoins.has(guild.id), false, 'a deliberate leave must not be undone');
+});
+
+test('a repeated move advances the same bounded sequence rather than restarting it', () => {
+  const { channel, guild } = moveChannel({ humans: 1 });
+  voice.sessions.set(guild.id, fakeNvsSession({ channel }));
+  const { old, next } = movePair({ guild, member: { id: 'bot-1', displayName: 'Assistant' } });
+
+  voice.noteVoiceState(old, next);
+  // Clear the armed timer but keep the counter: the state the next move sees.
+  const state = voice.rejoins.get(guild.id);
+  clearTimeout(state.timer);
+  state.timer = null;
+  voice.noteVoiceState(old, next);
+
+  assert.equal(
+    state.attempts,
+    2,
+    'a channel the bot cannot rejoin must run out of attempts, not ping-pong forever',
+  );
+});
+
+test('noteVoiceState returns the bot even with transcription off', () => {
+  const { channel, guild } = moveChannel({ humans: 1 });
+  voice.sessions.set(guild.id, fakeNvsSession({ channel })); // no transcript
+  const { old, next } = movePair({ guild, member: { id: 'bot-1', displayName: 'Assistant' } });
+
+  voice.noteVoiceState(old, next);
+
+  assert.equal(
+    voice.rejoins.get(guild.id)?.attempts,
+    1,
+    'the repair sits before the transcript guard, so TRANSCRIBE=off still returns the bot',
+  );
+});

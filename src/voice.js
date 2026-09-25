@@ -1829,6 +1829,45 @@ function noteVoiceState(oldState, newState) {
     log.debug('voice: arrival, cancelling idle release', { guildId, channel: here });
   }
 
+  // A channel MOVE and a Discord-side KICK both bypass the `stateChange`
+  // handler entirely — neither produces a `Disconnected` it could act on. A
+  // move is followed by the library (`ready -> connecting -> ready`); a kick
+  // goes `ready -> signalling` and then nothing at all. Measured live
+  // 2026-09-25: after each, the bot sat outside its channel and nothing
+  // brought it back, which the operator reads as the same defect this module
+  // exists to fix. The kick is the likelier real-world cause of the original
+  // incident.
+  //
+  // Both share one signal — the bot's own member is no longer in
+  // `session.channelId` — so both are handled as an unrequested leave and
+  // repaired by the same bounded rejoin. Nothing here reads the destination:
+  // a move reports the other channel in `newState.channelId`, a kick reports
+  // null, and the target is always `session.channelId`, the original.
+  //
+  // Placed AFTER the empty-channel block so a bot that leaves an EMPTY channel
+  // still follows the idle-release path — nobody is there to serve, and it
+  // matches `restoreCall`'s `humansIn === 0` skip. Placed BEFORE the transcript
+  // guard so a call with TRANSCRIBE off is repaired too.
+  //
+  // `was` is implied by `!is` (line 1788 returns when they are equal). The
+  // `leaveReason` check is belt-and-braces: an intentional leave deletes the
+  // session, so `sessions.get` above has normally already returned.
+  //
+  // Reading module-level `log` / `scheduleRejoin` here is deliberate and not a
+  // `node/architecture/inject-dependencies` violation: that rule is scoped to
+  // app and handler FACTORIES taking mutable module state as a parameter, and
+  // `noteVoiceState`, `scheduleRejoin` and `leave` are all plain module
+  // functions — the same shape the `stateChange` handler above already uses.
+  const botId = channel?.guild?.members?.me?.id;
+  if (!is && botId && userId === botId && !session.leaveReason) {
+    log.info('voice: bot left its channel, returning', {
+      guildId,
+      channelId: here,
+      leftTo: newState.channelId ?? null,
+    });
+    scheduleRejoin(guildId, channel);
+  }
+
   if (!session.transcript) return;
   if (userId && name) session.names.set(userId, name);
 
