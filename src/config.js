@@ -115,11 +115,8 @@ const config = {
   // @mention surface that everyone allowed is meant to use. Fails closed for
   // the same reason `allowedUserIds` does: empty means NO admins, never all.
   //
-  // Discord's own visibility gate is permission-based, not id-based — there is
-  // no "show this command to these user ids" in the API — so the ids here
-  // cannot hide a command by themselves. They are the defence-in-depth half:
-  // `setDefaultMemberPermissions` hides the command in the client,
-  // `isAdmin` refuses it on the wire if someone reaches it anyway.
+  // `/ben` is visible to every member of the guild, so `isAdmin` refusing it
+  // on the wire is the whole gate — there is no client-side hiding behind it.
   // UNSET inherits the allowlist, so every existing deployment keeps working
   // exactly as it did — this release would otherwise take slash commands away
   // from every instance that never heard of ADMIN_USER_IDS. Set it explicitly
@@ -132,12 +129,12 @@ const config = {
   // Which guilds get slash commands registered at all. Empty = every guild the
   // bot is in (the historical behaviour, and right for a single-guild install).
   //
-  // Exists because permission-gated visibility cuts both ways: on a guild where
-  // the operator is an ordinary member, a command gated on ManageGuild is hidden
-  // from THEM too, so gating alone cannot produce "admins only" there. Naming no
-  // guild is then the honest surface — the same reasoning as VOICE_ENABLED=0
-  // omitting join/leave rather than registering them to refuse. The @mention
-  // surface is unaffected; it is not a slash command.
+  // Exists because `/ben` is visible to every member wherever it is registered:
+  // on a guild with no admins at all, registering it only advertises a command
+  // that refuses everyone. Naming no guild is then the honest surface — the
+  // same reasoning as VOICE_ENABLED=0 omitting join/leave rather than
+  // registering them to refuse. The @mention surface is unaffected; it is not a
+  // slash command.
   slashCommandGuildIds: list(process.env.SLASH_COMMAND_GUILD_IDS),
 
   // How many prior messages a text thread resends. The endpoint may be

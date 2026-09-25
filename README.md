@@ -10,7 +10,7 @@ Discord (cloud)
    |  outbound gateway — no ingress, no tunnel
 discord-assistant  (single Node service, single bot identity)
    |-- text    DM / thread    ------------------> OpenAI-compatible endpoint
-   \-- voice   /join, /leave, /cancel  -> speech-to-speech -> same endpoint
+   \-- voice   /ben join|leave|cancel -> speech-to-speech -> same endpoint
 ```
 
 Today that endpoint is MiniMax. Later it is a wrapper around a Claude Code session, and neither surface changes — only `OPENAI_BASE_URL`.
@@ -24,7 +24,7 @@ One Discord bot identity permits one gateway connection, so text and voice must 
 Both surfaces work, verified end to end against a real Claude Code session:
 
 - **Text** — DM, or `@mention` in a guild channel. A mention opens a **thread** and the conversation continues there, so follow-ups need no `@` and history stays scoped to the thread rather than to whatever else the channel was discussing. DMs stay flat — Discord has no threads in DMs.
-- **Voice** — `/join` from a voice channel, talk, hear the reply. Barge-in supported.
+- **Voice** — `/ben join` from a voice channel, talk, hear the reply. Barge-in supported.
 - **Sender allowlist** on both surfaces, failing closed.
 - **One conversation per surface** — each thread, DM and channel keeps its own Claude Code session. A voice channel is a single conversation covering both what is spoken and what is typed in its chat; a DM is a different one. See [Sessions](#sessions).
 - **Session control** — `new`, `sessions`, `switch <id>`: start fresh, see what is bound where, or pick up a session started at the desk.
@@ -53,7 +53,7 @@ ALLOWED_USER_IDS=<your-discord-user-id> \
 S2S_MODE=realtime ~/Documents/workspaces/scripts/s2s-minimax
 ```
 
-DM the bot to use text. `/join` from a voice channel to use voice, `/leave` to stop. `/cancel` stops the reply currently being spoken without speaking over it — it works whether or not barge-in is enabled, and replies `Nothing is playing right now.` when idle. It stops playback only: the reply is still generated server-side and still reaches the transcript.
+DM the bot to use text. `/ben join` from a voice channel to use voice, `/ben leave` to stop. `/ben cancel` stops the reply currently being spoken without speaking over it — it works whether or not barge-in is enabled, and replies `Nothing is playing right now.` when idle. It stops playback only: the reply is still generated server-side and still reaches the transcript.
 
 To put Claude Code behind it instead of a hosted model, run `make shim` and point `OPENAI_BASE_URL` at it.
 
@@ -128,7 +128,7 @@ Each thread is likewise its own conversation, not a view onto a shared one. An e
 
 Threading requires **Create Public Threads** and **Send Messages in Threads**. Without them the bot logs a warning and answers in the channel instead of losing the reply.
 
-Three commands manage them, as slash commands or typed words:
+Three commands manage them, as `/ben` subcommands or typed words:
 
 | Command       | Effect                                                                            |
 | ------------- | --------------------------------------------------------------------------------- |
@@ -146,7 +146,7 @@ Inspect with `status` in Discord, or `curl -s localhost:8080/v1/sessions`. The `
 
 ## `status` — checking the legs live
 
-`/status`, or a typed `status` / `selfcheck`. Every leg is probed rather than reported from config: "the endpoint is configured at :8080" is a different claim from "the endpoint answers", and only the second is worth reading when something is broken. Available over both transports on purpose — a diagnostic sharing a transport with the thing it diagnoses is useless exactly when it is needed.
+`/ben status`, or a typed `status` / `selfcheck`. Every leg is probed rather than reported from config: "the endpoint is configured at :8080" is a different claim from "the endpoint answers", and only the second is worth reading when something is broken. Available over both transports on purpose — a diagnostic sharing a transport with the thing it diagnoses is useless exactly when it is needed.
 
 It also names the **Claude Code session** answering the current channel:
 
