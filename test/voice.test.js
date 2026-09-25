@@ -2199,14 +2199,19 @@ test('restoreCall clears the record when the channel is empty — a stale call i
   );
 });
 
-// --- a channel MOVE is not a disconnect (2026-09-25) ------------------------
+// --- the bot leaving its channel is not a disconnect (2026-09-25) -----------
 //
-// discord.js follows a move — `ready -> connecting -> ready` — so `stateChange`
-// never sees a Disconnected it could repair, and the bot stays where it was
-// put. The operator's contract is that it belongs in its own channel, so a move
-// out is treated as an unrequested leave and repaired by the same bounded
-// rejoin. Measured live: the bot sat in the channel it was moved to and nothing
-// brought it back.
+// Two shapes bypass `stateChange` entirely, neither producing a `Disconnected`
+// it could repair: a MOVE, which the library follows (`ready -> connecting ->
+// ready`), and a KICK, which goes `ready -> signalling` and then nothing at
+// all. Measured live: after each, the bot sat outside its channel and nothing
+// brought it back. The kick is the likelier real-world cause of the incident
+// this module exists to fix.
+//
+// Both share one signal — the bot's own member is no longer in
+// `session.channelId` — and both are repaired by the same bounded rejoin into
+// the ORIGINAL channel. Nothing reads the destination, so a kick's null is as
+// valid an input as a move's other channel.
 
 /** A channel + guild carrying the bot's own member id, as the real one does. */
 function moveChannel({ humans = 1, botId = 'bot-1' } = {}) {
@@ -2243,6 +2248,40 @@ test('noteVoiceState returns the bot to its own channel after a move', () => {
     1,
     'a move out of its channel must schedule the same bounded rejoin a disconnect does',
   );
+});
+
+/** A KICK: the bot is out of voice entirely, so the destination is null. */
+function kickPair({ guild, member }) {
+  return {
+    old: { guildId: guild.id, guild, channelId: 'chan-A', member },
+    next: { guildId: guild.id, guild, channelId: null, member },
+  };
+}
+
+test('noteVoiceState returns the bot after a Discord-side kick', () => {
+  // The primary case: a kick goes `ready -> signalling` and then nothing, so
+  // the `stateChange` handler never fires and this is the only repair path.
+  const { channel, guild } = moveChannel({ humans: 1 });
+  voice.sessions.set(guild.id, fakeNvsSession({ channel }));
+  const { old, next } = kickPair({ guild, member: { id: 'bot-1', displayName: 'Assistant' } });
+
+  voice.noteVoiceState(old, next);
+
+  assert.equal(
+    voice.rejoins.get(guild.id)?.attempts,
+    1,
+    'a kick must schedule a rejoin of the ORIGINAL channel — the target is never read from newState',
+  );
+});
+
+test('noteVoiceState ignores a human leaving the channel', () => {
+  const { channel, guild } = moveChannel({ humans: 1 });
+  voice.sessions.set(guild.id, fakeNvsSession({ channel }));
+  const { old, next } = kickPair({ guild, member: { id: 'u1', displayName: 'Uno' } });
+
+  voice.noteVoiceState(old, next);
+
+  assert.equal(voice.rejoins.has(guild.id), false, 'a human disconnecting is not the bot leaving');
 });
 
 test('noteVoiceState ignores a human moving between channels', () => {

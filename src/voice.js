@@ -1829,28 +1829,35 @@ function noteVoiceState(oldState, newState) {
     log.debug('voice: arrival, cancelling idle release', { guildId, channel: here });
   }
 
-  // A channel MOVE is not a disconnect: discord.js follows it, so the
-  // connection goes `ready -> connecting -> ready` and the `stateChange`
-  // handler never sees a Disconnected it could act on. Measured live
-  // 2026-09-25 — the bot sat in the channel it was moved to and nothing
+  // A channel MOVE and a Discord-side KICK both bypass the `stateChange`
+  // handler entirely — neither produces a `Disconnected` it could act on. A
+  // move is followed by the library (`ready -> connecting -> ready`); a kick
+  // goes `ready -> signalling` and then nothing at all. Measured live
+  // 2026-09-25: after each, the bot sat outside its channel and nothing
   // brought it back, which the operator reads as the same defect this module
-  // exists to fix. So a move out of its own channel is treated as an
-  // unrequested leave and repaired by the same bounded rejoin.
+  // exists to fix. The kick is the likelier real-world cause of the original
+  // incident.
   //
-  // Placed AFTER the empty-channel block so a bot moved out of an EMPTY
-  // channel still follows the idle-release path — nobody is there to serve,
-  // and it matches `restoreCall`'s `humansIn === 0` skip. Placed BEFORE the
-  // transcript guard so a call with TRANSCRIBE off is repaired too.
+  // Both share one signal — the bot's own member is no longer in
+  // `session.channelId` — so both are handled as an unrequested leave and
+  // repaired by the same bounded rejoin. Nothing here reads the destination:
+  // a move reports the other channel in `newState.channelId`, a kick reports
+  // null, and the target is always `session.channelId`, the original.
+  //
+  // Placed AFTER the empty-channel block so a bot that leaves an EMPTY channel
+  // still follows the idle-release path — nobody is there to serve, and it
+  // matches `restoreCall`'s `humansIn === 0` skip. Placed BEFORE the transcript
+  // guard so a call with TRANSCRIBE off is repaired too.
   //
   // `was` is implied by `!is` (line 1788 returns when they are equal). The
   // `leaveReason` check is belt-and-braces: an intentional leave deletes the
   // session, so `sessions.get` above has normally already returned.
   const botId = channel?.guild?.members?.me?.id;
   if (!is && botId && userId === botId && !session.leaveReason) {
-    log.info('voice: moved out of its channel, returning', {
+    log.info('voice: bot left its channel, returning', {
       guildId,
       channelId: here,
-      movedTo: newState.channelId ?? null,
+      leftTo: newState.channelId ?? null,
     });
     scheduleRejoin(guildId, channel);
   }
