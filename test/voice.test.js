@@ -2198,3 +2198,104 @@ test('restoreCall clears the record when the channel is empty — a stale call i
     'rejoining an empty channel would park the bot there holding the s2s slot',
   );
 });
+
+// --- a channel MOVE is not a disconnect (2026-09-25) ------------------------
+//
+// discord.js follows a move — `ready -> connecting -> ready` — so `stateChange`
+// never sees a Disconnected it could repair, and the bot stays where it was
+// put. The operator's contract is that it belongs in its own channel, so a move
+// out is treated as an unrequested leave and repaired by the same bounded
+// rejoin. Measured live: the bot sat in the channel it was moved to and nothing
+// brought it back.
+
+/** A channel + guild carrying the bot's own member id, as the real one does. */
+function moveChannel({ humans = 1, botId = 'bot-1' } = {}) {
+  const users = Array.from({ length: humans }, () => ({ user: { bot: false } }));
+  const channel = { members: fakeMembers(users) };
+  const guild = {
+    id: 'guild-nvs',
+    channels: { cache: { get: () => channel } },
+    members: { me: { id: botId } },
+  };
+  // The real channel object carries its guild; noteVoiceState reads
+  // `channel.guild.members.me` to tell the bot apart from a human.
+  channel.guild = guild;
+  return { channel, guild };
+}
+
+/** A MOVE, not a leave: the member stays in voice but lands elsewhere. */
+function movePair({ guild, member }) {
+  return {
+    old: { guildId: guild.id, guild, channelId: 'chan-A', member },
+    next: { guildId: guild.id, guild, channelId: 'chan-B', member },
+  };
+}
+
+test('noteVoiceState returns the bot to its own channel after a move', () => {
+  const { channel, guild } = moveChannel({ humans: 1 });
+  voice.sessions.set(guild.id, fakeNvsSession({ channel }));
+  const { old, next } = movePair({ guild, member: { id: 'bot-1', displayName: 'Assistant' } });
+
+  voice.noteVoiceState(old, next);
+
+  assert.equal(
+    voice.rejoins.get(guild.id)?.attempts,
+    1,
+    'a move out of its channel must schedule the same bounded rejoin a disconnect does',
+  );
+});
+
+test('noteVoiceState ignores a human moving between channels', () => {
+  const { channel, guild } = moveChannel({ humans: 1 });
+  voice.sessions.set(guild.id, fakeNvsSession({ channel }));
+  const { old, next } = movePair({ guild, member: { id: 'u1', displayName: 'Uno' } });
+
+  voice.noteVoiceState(old, next);
+
+  assert.equal(voice.rejoins.has(guild.id), false, 'only the bot being moved is our business');
+});
+
+test('noteVoiceState does not fight an intentional leave', () => {
+  const { channel, guild } = moveChannel({ humans: 1 });
+  const session = fakeNvsSession({ channel });
+  session.leaveReason = 'command';
+  voice.sessions.set(guild.id, session);
+  const { old, next } = movePair({ guild, member: { id: 'bot-1', displayName: 'Assistant' } });
+
+  voice.noteVoiceState(old, next);
+
+  assert.equal(voice.rejoins.has(guild.id), false, 'a deliberate leave must not be undone');
+});
+
+test('a repeated move advances the same bounded sequence rather than restarting it', () => {
+  const { channel, guild } = moveChannel({ humans: 1 });
+  voice.sessions.set(guild.id, fakeNvsSession({ channel }));
+  const { old, next } = movePair({ guild, member: { id: 'bot-1', displayName: 'Assistant' } });
+
+  voice.noteVoiceState(old, next);
+  // Clear the armed timer but keep the counter: the state the next move sees.
+  const state = voice.rejoins.get(guild.id);
+  clearTimeout(state.timer);
+  state.timer = null;
+  voice.noteVoiceState(old, next);
+
+  assert.equal(
+    state.attempts,
+    2,
+    'a channel the bot cannot rejoin must run out of attempts, not ping-pong forever',
+  );
+});
+
+test('noteVoiceState returns the bot even with transcription off', () => {
+  const { channel, guild } = moveChannel({ humans: 1 });
+  voice.sessions.set(guild.id, fakeNvsSession({ channel })); // no transcript
+  const { old, next } = movePair({ guild, member: { id: 'bot-1', displayName: 'Assistant' } });
+
+  voice.noteVoiceState(old, next);
+
+  assert.equal(
+    voice.rejoins.get(guild.id)?.attempts,
+    1,
+    'the repair sits before the transcript guard, so TRANSCRIBE=off still returns the bot',
+  );
+});

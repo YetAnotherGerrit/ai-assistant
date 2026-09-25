@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 - MINOR version when you add functionality in a backwards-compatible manner, and
 - PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: return to its own channel when the bot is moved. A channel move is not a disconnect — discord.js follows it, so the connection goes `ready -> connecting -> ready` and the `stateChange` handler never sees a `Disconnected` it could repair. Measured live 2026-09-25: the bot sat in the channel it was moved to and nothing brought it back. `noteVoiceState` now treats a move of the bot's own member out of its channel as an unrequested leave and repairs it with the same bounded rejoin, logging `voice: moved out of its channel, returning`. It sits after the empty-channel block, so a bot moved out of an empty channel still follows the idle-release path, and before the transcript guard, so a call with `TRANSCRIBE` off is repaired too.
+
 ## v0.51.2
 
 - fix: restore a live voice call after a process restart. A restart is not a disconnect the running process can repair — it is gone before `stateChange` can fire — so the bot now writes the call it is in to `VOICE_STATE_PATH` (default `~/.local/state/discord-assistant/live-call-<identity>.json`; the identity is in the name because several bots share one `$HOME`) and rejoins it at boot, after the leftover-connection eviction that removes the dead process's ghost, and only when somebody is still in the channel — a record outlives the call it describes. The record is cleared only on the leaves that genuinely end a call (`/leave`, idle, yield, slot-in-use) and deliberately preserved on `shutdown` — which is what a restart looks like from inside the process — and on a rejoin's own `pre-join` cleanup. Found 2026-09-25: a `launchctl kickstart -k` deploy dropped the operator's call and nothing brought it back.

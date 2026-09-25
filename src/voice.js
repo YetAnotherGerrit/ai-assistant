@@ -1829,6 +1829,32 @@ function noteVoiceState(oldState, newState) {
     log.debug('voice: arrival, cancelling idle release', { guildId, channel: here });
   }
 
+  // A channel MOVE is not a disconnect: discord.js follows it, so the
+  // connection goes `ready -> connecting -> ready` and the `stateChange`
+  // handler never sees a Disconnected it could act on. Measured live
+  // 2026-09-25 — the bot sat in the channel it was moved to and nothing
+  // brought it back, which the operator reads as the same defect this module
+  // exists to fix. So a move out of its own channel is treated as an
+  // unrequested leave and repaired by the same bounded rejoin.
+  //
+  // Placed AFTER the empty-channel block so a bot moved out of an EMPTY
+  // channel still follows the idle-release path — nobody is there to serve,
+  // and it matches `restoreCall`'s `humansIn === 0` skip. Placed BEFORE the
+  // transcript guard so a call with TRANSCRIBE off is repaired too.
+  //
+  // `was` is implied by `!is` (line 1788 returns when they are equal). The
+  // `leaveReason` check is belt-and-braces: an intentional leave deletes the
+  // session, so `sessions.get` above has normally already returned.
+  const botId = channel?.guild?.members?.me?.id;
+  if (!is && botId && userId === botId && !session.leaveReason) {
+    log.info('voice: moved out of its channel, returning', {
+      guildId,
+      channelId: here,
+      movedTo: newState.channelId ?? null,
+    });
+    scheduleRejoin(guildId, channel);
+  }
+
   if (!session.transcript) return;
   if (userId && name) session.names.set(userId, name);
 
