@@ -116,13 +116,25 @@ const REFUSAL_TEXT =
   'Sorry, you have to be on the Data Assistant allowlist to use me — ask Benjamin Borbe for access.';
 
 /**
- * Posted when a turn outlives `config.gchatProgressAfterMs`.
+ * The placeholder posted the moment an allowlisted mention arrives, BEFORE the
+ * shim is called.
  *
- * Short on purpose: it is a liveness signal, not content. The answer follows in
- * the same thread, and a second paragraph here would only compete with it.
+ * It exists so the thread is never silent while a turn runs — a demo turn that
+ * investigates and writes code takes minutes. It is edited in place to one of
+ * the markers below rather than deleted, so the thread keeps its shape: the
+ * placeholder's position is where the turn happened.
  */
-const PROGRESS_TEXT =
-  'Working on it… this one is taking a while. The answer will land in this thread.';
+const THINKING_TEXT = '🤔 thinking…';
+
+/**
+ * Terminal markers the placeholder is edited to.
+ *
+ * One character each. By the time it carries one the placeholder has already
+ * done its job, and a sentence here would read as a second answer competing
+ * with the real one posted beside it.
+ */
+const ANSWERED_TEXT = '💡';
+const FAILED_TEXT = '⚠️';
 
 /**
  * Is this sender allowed to drive the Chat surface?
@@ -186,40 +198,41 @@ async function postChatReply({ spaceName, threadName, text }) {
 }
 
 /**
- * Run `run()`, calling `onProgress()` once if it has not settled within
- * `afterMs`.
+ * Edit a message the app itself posted.
  *
- * The timer is cleared the moment `run()` settles, so a fast turn posts
- * nothing — that threshold is the point, not a detail. A slow turn posts
- * exactly once: the timer is armed once and never re-armed.
- *
- * An in-flight progress post is awaited before returning, so it is always in
- * the thread BEFORE the answer that follows. The post is best-effort — a
- * failure is logged and never fails the turn, because a courtesy notice must
- * never be able to lose an answer.
- *
- * `schedule`/`cancel` are injected so a test can drive the clock instead of
- * waiting out a real threshold.
+ * `chat.bot` covers the app's OWN messages, so the scope that posts also
+ * patches — no user auth, and no second credential path. `updateMask=text` is
+ * required: without it the PATCH is read as a full replace and Chat rejects the
+ * partial body.
  */
-async function withProgress({
-  afterMs,
-  onProgress,
-  run,
-  schedule = setTimeout,
-  cancel = clearTimeout,
-}) {
-  let pending = null;
-  const timer = schedule(() => {
-    pending = Promise.resolve()
-      .then(onProgress)
-      .catch((e) => log.error('gchat progress post failed', { error: e.message }));
-  }, afterMs);
-  try {
-    return await run();
-  } finally {
-    cancel(timer);
-    if (pending) await pending;
-  }
+async function patchChatMessage({ messageName, text }) {
+  const token = await chatAccessToken(CHAT_WRITE_SCOPES);
+  const params = new URLSearchParams({ updateMask: 'text' });
+  const res = await fetch(`https://chat.googleapis.com/v1/${messageName}?${params}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ text }),
+  });
+  if (!res.ok) throw new Error(`chat api ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  return res.json();
+}
+
+/**
+ * Edit the turn's placeholder to its terminal marker.
+ *
+ * Best-effort by design: the answer is already in the thread by the time this
+ * runs, so a failed edit must never turn a delivered answer into a failed turn.
+ * A missing placeholder — its own post failed, so the turn never got one — is a
+ * no-op rather than an error.
+ *
+ * `patch` is injected so a test can assert the call without a Chat API round
+ * trip.
+ */
+async function markPlaceholder(placeholder, text, patch = patchChatMessage) {
+  if (!placeholder?.name) return;
+  await patch({ messageName: placeholder.name, text }).catch((e) =>
+    log.error('gchat placeholder edit failed', { error: e.message }),
+  );
 }
 
 /**
@@ -261,6 +274,10 @@ function startGchat() {
       thread: event.threadName ?? null,
       sessionKey: key,
     });
+    // The turn's placeholder, once posted. Held out here so the catch can edit
+    // it to its terminal marker; stays null while the placeholder post itself is
+    // the thing that failed, which `markPlaceholder` treats as a no-op.
+    let placeholder = null;
     try {
       if (!allowed) {
         await postChatReply({
@@ -271,31 +288,30 @@ function startGchat() {
         message.ack();
         return;
       }
+      // Answer the mention immediately with the placeholder, BEFORE the shim
+      // call. A demo turn takes minutes, and without this the thread is silent
+      // for the whole of it. The answer lands as its own message beside it.
+      placeholder = await postChatReply({
+        spaceName: event.spaceName,
+        threadName: event.threadName,
+        text: THINKING_TEXT,
+      });
       // Answer from the mention alone. Google Chat delivers only @mentions, and
       // reading what was said between them needs a scope only a Workspace
       // administrator can grant — without it every turn took a 403 for no
       // benefit. The session already remembers the rest of the conversation, so
       // no history is supplied.
-      const answer = await withProgress({
-        afterMs: config.gchatProgressAfterMs,
-        onProgress: () =>
-          postChatReply({
-            spaceName: event.spaceName,
-            threadName: event.threadName,
-            text: PROGRESS_TEXT,
-          }),
-        run: () =>
-          converse({
-            sessionKey: key,
-            text: event.argumentText,
-            system: SYSTEM_DIRECTIVE,
-          }),
+      const answer = await converse({
+        sessionKey: key,
+        text: event.argumentText,
+        system: SYSTEM_DIRECTIVE,
       });
       await postChatReply({
         spaceName: event.spaceName,
         threadName: event.threadName,
         text: answer,
       });
+      await markPlaceholder(placeholder, ANSWERED_TEXT);
       message.ack();
     } catch (e) {
       log.error('gchat turn failed', { error: e.message, permanent: Boolean(e.permanent) });
@@ -310,9 +326,13 @@ function startGchat() {
         }).catch((noticeError) =>
           log.error('gchat error notice failed', { error: noticeError.message }),
         );
+        await markPlaceholder(placeholder, FAILED_TEXT);
         message.ack();
         return;
       }
+      // A transient failure is redelivered, so the retry will answer — but the
+      // placeholder must not keep claiming the turn is still running.
+      await markPlaceholder(placeholder, FAILED_TEXT);
       message.nack();
     }
   });
@@ -329,7 +349,10 @@ module.exports = {
   classify,
   isAllowedSender,
   REFUSAL_TEXT,
-  PROGRESS_TEXT,
-  withProgress,
+  THINKING_TEXT,
+  ANSWERED_TEXT,
+  FAILED_TEXT,
+  patchChatMessage,
+  markPlaceholder,
   startGchat,
 };
