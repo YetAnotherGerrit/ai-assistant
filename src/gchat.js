@@ -285,6 +285,39 @@ async function fetchThreadMessages({ spaceName, threadName, cap = THREAD_FETCH_C
 }
 
 /**
+ * Read the thread for one turn, never throwing.
+ *
+ * A turn must answer even when the thread cannot be read, and that is the
+ * ORDINARY case until a Workspace administrator grants
+ * `chat.app.messages.readonly`: `spaces.messages.list` answers 403 on every
+ * turn until then. So the failure is absorbed here, not in the subscriber —
+ * the caller gets an empty history and the turn proceeds with the mention
+ * alone. Keeping the catch inside this function is what stops a read failure
+ * reaching the subscriber's outer catch, which nacks the message and makes
+ * Pub/Sub redeliver it.
+ *
+ * `fetchThread` is injected so the failure path is testable without a
+ * credential or a network.
+ */
+async function readThreadHistory(event, fetchThread = fetchThreadMessages) {
+  try {
+    const threadMessages = await fetchThread({
+      spaceName: event.spaceName,
+      threadName: event.threadName,
+    });
+    const history = threadHistory(threadMessages, event.messageName);
+    log.info(`fetched ${history.length} messages`, {
+      space: event.spaceName,
+      thread: event.threadName ?? null,
+    });
+    return history;
+  } catch (e) {
+    log.warn('gchat thread read failed', { error: e.message });
+    return [];
+  }
+}
+
+/**
  * Start the Pub/Sub pull subscriber. Returns `{ close, subscription }` so the
  * caller can hook graceful shutdown.
  *
@@ -337,21 +370,9 @@ function startGchat() {
       // so everything said between them is invisible unless it is fetched — and
       // that is the case the goal's criterion names ("a second person in the
       // same thread sees the work and steers it"). A failed read is not fatal:
-      // the turn still answers, with less context than it wanted.
-      let history = [];
-      try {
-        const threadMessages = await fetchThreadMessages({
-          spaceName: event.spaceName,
-          threadName: event.threadName,
-        });
-        history = threadHistory(threadMessages, event.messageName);
-        log.info(`fetched ${history.length} messages`, {
-          space: event.spaceName,
-          thread: event.threadName ?? null,
-        });
-      } catch (e) {
-        log.warn('gchat thread read failed', { error: e.message });
-      }
+      // `readThreadHistory` owns that guarantee and hands back an empty history,
+      // so a 403 here never reaches the nack below.
+      const history = await readThreadHistory(event);
       const answer = await converse({
         sessionKey: key,
         history,
@@ -387,6 +408,7 @@ module.exports = {
   threadHistory,
   collectThreadMessages,
   fetchThreadMessages,
+  readThreadHistory,
   THREAD_FETCH_CAP,
   startGchat,
 };

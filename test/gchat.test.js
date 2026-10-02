@@ -17,6 +17,7 @@ const {
   threadWindow,
   threadHistory,
   collectThreadMessages,
+  readThreadHistory,
   THREAD_FETCH_CAP,
 } = require('../src/gchat');
 
@@ -237,6 +238,49 @@ test('collectThreadMessages on an empty thread returns nothing', async () => {
     fetchPage: async () => ({ messages: [], nextPageToken: null }),
   });
   assert.deepEqual(out, []);
+});
+
+// The read must never fail a turn. Until a Workspace administrator grants
+// `chat.app.messages.readonly`, `spaces.messages.list` answers 403 on EVERY
+// turn — the bot still has to answer, with the mention alone. If this catch
+// ever moves out to the subscriber, the throw reaches its outer catch, the
+// message is nacked, and Pub/Sub redelivers it: a loop, not a degraded answer.
+const THREAD_EVENT = {
+  spaceName: 'spaces/AAA',
+  threadName: 'spaces/AAA/threads/BBB',
+  messageName: 'spaces/AAA/messages/2',
+};
+
+test('readThreadHistory returns an empty history when the read is refused', async () => {
+  const history = await readThreadHistory(THREAD_EVENT, async () => {
+    throw new Error('chat api 403: The administrator must grant the app the required scope');
+  });
+  assert.deepEqual(history, []);
+});
+
+test('readThreadHistory never throws, whatever the read fails with', async () => {
+  const history = await readThreadHistory(THREAD_EVENT, async () => {
+    throw new Error('getaddrinfo ENOTFOUND chat.googleapis.com');
+  });
+  assert.deepEqual(history, []);
+});
+
+test('readThreadHistory returns the thread window on a successful read', async () => {
+  const history = await readThreadHistory(THREAD_EVENT, async () => [
+    {
+      name: 'spaces/AAA/messages/1',
+      text: 'the deploy failed',
+      sender: { type: 'HUMAN' },
+      createTime: '1',
+    },
+    {
+      name: 'spaces/AAA/messages/2',
+      text: '@Data Assistant what broke?',
+      sender: { type: 'HUMAN' },
+      createTime: '2',
+    },
+  ]);
+  assert.deepEqual(history, [{ role: 'user', content: 'the deploy failed' }]);
 });
 
 delete process.env.GCHAT_ALLOWED_EMAILS;
