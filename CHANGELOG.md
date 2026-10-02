@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 - MINOR version when you add functionality in a backwards-compatible manner, and
 - PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.54.3
 
 - refactor: remove the Google Chat thread read. Reading what was said between mentions needs `chat.app.messages.readonly`, a scope a Google Workspace administrator must grant; `chat.bot` cannot list messages (`ACCESS_TOKEN_SCOPE_INSUFFICIENT`), so until that grant landed every turn minted a token, took a 403 from `spaces.messages.list` and logged a warn for no benefit. The read, its scope, its helpers (`readThreadHistory`, `fetchThreadMessages`, `collectThreadMessages`, `threadHistory`, `threadWindow`, `messagesToHistory`) and their tests are gone, and the bot answers from the mention alone — the session already remembers the rest of the conversation. The read never reaches the model, so the turn behaviour is unchanged; what goes away is the per-turn 403 and its warn.
 
