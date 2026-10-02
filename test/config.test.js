@@ -205,3 +205,35 @@ test('the release timeout defaults to one hour with neither name set', () => {
   delete require.cache[require.resolve('../src/config')];
   assert.equal(require('../src/config').voiceEmptyRoomReleaseMs, 3600000);
 });
+
+// The progress threshold. A typo'd value must fall back rather than reach
+// setTimeout: `NaN` is treated as 0, so a garbage threshold would post the
+// "working on it" notice on EVERY turn — the exact opposite of what the setting
+// is for, and silent.
+test('gchatProgressAfterMs defaults to 15 s when unset', () => {
+  delete process.env.GCHAT_PROGRESS_AFTER_MS;
+  delete require.cache[require.resolve('../src/config')];
+  assert.equal(require('../src/config').gchatProgressAfterMs, 15000);
+});
+
+test('gchatProgressAfterMs reads a positive integer, quotes stripped', () => {
+  for (const raw of ['30000', ' 30000 ', '"30000"']) {
+    process.env.GCHAT_PROGRESS_AFTER_MS = raw;
+    delete require.cache[require.resolve('../src/config')];
+    assert.equal(require('../src/config').gchatProgressAfterMs, 30000, raw);
+  }
+  delete process.env.GCHAT_PROGRESS_AFTER_MS;
+});
+
+test('gchatProgressAfterMs falls back on anything that is not a positive integer', () => {
+  for (const raw of ['', 'soon', '0', '-1', 'NaN']) {
+    process.env.GCHAT_PROGRESS_AFTER_MS = raw;
+    delete require.cache[require.resolve('../src/config')];
+    assert.equal(
+      require('../src/config').gchatProgressAfterMs,
+      15000,
+      `GCHAT_PROGRESS_AFTER_MS=${raw} must not reach setTimeout as NaN`,
+    );
+  }
+  delete process.env.GCHAT_PROGRESS_AFTER_MS;
+});

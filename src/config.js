@@ -23,6 +23,23 @@ function flag(raw, fallback) {
   return fallback;
 }
 
+/**
+ * Read a positive-integer millisecond env var.
+ *
+ * The fallback carries more weight here than it does for `flag`: a NaN delay
+ * makes `setTimeout` fire on the next tick, so a typo'd threshold would post
+ * the "working on it" notice on EVERY turn — the exact opposite of the intent.
+ * Anything that is not a positive integer falls back rather than degrading.
+ * Quotes are stripped for the same MAKE-semantics reason as `flag`.
+ */
+function millis(raw, fallback) {
+  const v = String(raw ?? '')
+    .replace(/^["']|["']$/g, '')
+    .trim();
+  const n = parseInt(v, 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
 // Noise that may sit between the start of a sentence and the wake phrase.
 // Mirrors the endpoint's `_FILLER_WORDS` (plus "hey", for a doubled "hey hey
 // bot"). Kept in sync by hand; a drift costs a missed trigger, never a false
@@ -194,6 +211,10 @@ const config = {
   gchatSubscription: (process.env.GCHAT_PUBSUB_SUBSCRIPTION || '').trim(),
   gchatProject: (process.env.GCHAT_PROJECT || '').trim(),
   gchatSaCredentials: (process.env.GCHAT_SA_CREDENTIALS || '').trim(),
+  // Post a "working on it" notice when a turn runs past this. A demo turn that
+  // investigates and writes code takes minutes, and without the notice the
+  // thread looks dead until the answer lands.
+  gchatProgressAfterMs: millis(process.env.GCHAT_PROGRESS_AFTER_MS, 15000),
 
   // Shared secret for the shim's POST /chat back-edge (health.js). Both
   // processes read the SAME env var name — a mismatch between a bot-side and

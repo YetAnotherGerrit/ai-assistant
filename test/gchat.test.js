@@ -9,7 +9,7 @@ const assert = require('node:assert');
 process.env.IDENTITY = 'data';
 delete require.cache[require.resolve('../src/config')];
 delete require.cache[require.resolve('../src/gchat')];
-const { parseEvent, gchatSessionKey, classify } = require('../src/gchat');
+const { parseEvent, gchatSessionKey, classify, withProgress } = require('../src/gchat');
 
 const CHAT_EVENT = {
   commonEventObject: { hostApp: 'CHAT', platform: 'WEB' },
@@ -115,3 +115,112 @@ test('isAllowedSender refuses a message that carries no sender address', () => {
 });
 
 delete process.env.GCHAT_ALLOWED_EMAILS;
+
+// The progress notice. A demo turn that investigates and writes code takes
+// minutes, and without a notice the thread looks dead until the answer lands.
+// The threshold is what keeps the notice off ordinary turns, so every case
+// below drives an injected clock instead of waiting out a real one.
+function fakeClock() {
+  const timers = [];
+  let scheduled = 0;
+  return {
+    schedule(fn) {
+      scheduled += 1;
+      const timer = { fn, cancelled: false };
+      timers.push(timer);
+      return timer;
+    },
+    cancel(timer) {
+      if (timer) timer.cancelled = true;
+    },
+    // Fire every live timer, the way the event loop would once the delay
+    // elapses.
+    async fire() {
+      for (const timer of timers) if (!timer.cancelled) await timer.fn();
+    },
+    scheduledCount: () => scheduled,
+    liveCount: () => timers.filter((t) => !t.cancelled).length,
+  };
+}
+
+test('withProgress posts nothing when the turn settles first', async () => {
+  const clock = fakeClock();
+  let posts = 0;
+  const answer = await withProgress({
+    afterMs: 15000,
+    onProgress: () => {
+      posts += 1;
+    },
+    run: async () => 'fast answer',
+    schedule: clock.schedule,
+    cancel: clock.cancel,
+  });
+
+  assert.equal(answer, 'fast answer');
+  assert.equal(posts, 0, 'a turn under the threshold must post no progress notice');
+  assert.equal(clock.liveCount(), 0, 'the timer is cleared, so a fast turn cannot post later');
+});
+
+test('withProgress posts exactly once when the turn outlives the threshold', async () => {
+  const clock = fakeClock();
+  let posts = 0;
+  const answer = await withProgress({
+    afterMs: 15000,
+    onProgress: () => {
+      posts += 1;
+    },
+    run: async () => {
+      await clock.fire();
+      return 'slow answer';
+    },
+    schedule: clock.schedule,
+    cancel: clock.cancel,
+  });
+
+  assert.equal(answer, 'slow answer');
+  assert.equal(posts, 1, 'a slow turn posts one notice, not one per interval');
+  assert.equal(clock.scheduledCount(), 1, 'the timer is armed once and never re-armed');
+});
+
+test('withProgress lands the notice before the answer', async () => {
+  const clock = fakeClock();
+  const landed = [];
+  await withProgress({
+    afterMs: 15000,
+    onProgress: async () => {
+      await new Promise((resolve) => setImmediate(resolve));
+      landed.push('progress');
+    },
+    run: async () => {
+      await clock.fire();
+      return 'slow answer';
+    },
+    schedule: clock.schedule,
+    cancel: clock.cancel,
+  });
+  landed.push('answer');
+
+  assert.deepEqual(
+    landed,
+    ['progress', 'answer'],
+    'the notice must be in the thread before the answer',
+  );
+});
+
+test('withProgress never loses the answer to a failed notice', async () => {
+  const clock = fakeClock();
+  const answer = await withProgress({
+    afterMs: 15000,
+    onProgress: async () => {
+      throw new Error('chat api 500');
+    },
+    run: async () => {
+      await clock.fire();
+      return 'slow answer';
+    },
+    schedule: clock.schedule,
+    cancel: clock.cancel,
+  });
+
+  assert.equal(answer, 'slow answer', 'a courtesy notice must never fail the turn');
+});

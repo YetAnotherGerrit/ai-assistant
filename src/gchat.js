@@ -116,6 +116,15 @@ const REFUSAL_TEXT =
   'Sorry, you have to be on the Data Assistant allowlist to use me — ask Benjamin Borbe for access.';
 
 /**
+ * Posted when a turn outlives `config.gchatProgressAfterMs`.
+ *
+ * Short on purpose: it is a liveness signal, not content. The answer follows in
+ * the same thread, and a second paragraph here would only compete with it.
+ */
+const PROGRESS_TEXT =
+  'Working on it… this one is taking a while. The answer will land in this thread.';
+
+/**
  * Is this sender allowed to drive the Chat surface?
  *
  * Case-insensitive: Google reports the address in the account's own casing
@@ -177,6 +186,43 @@ async function postChatReply({ spaceName, threadName, text }) {
 }
 
 /**
+ * Run `run()`, calling `onProgress()` once if it has not settled within
+ * `afterMs`.
+ *
+ * The timer is cleared the moment `run()` settles, so a fast turn posts
+ * nothing — that threshold is the point, not a detail. A slow turn posts
+ * exactly once: the timer is armed once and never re-armed.
+ *
+ * An in-flight progress post is awaited before returning, so it is always in
+ * the thread BEFORE the answer that follows. The post is best-effort — a
+ * failure is logged and never fails the turn, because a courtesy notice must
+ * never be able to lose an answer.
+ *
+ * `schedule`/`cancel` are injected so a test can drive the clock instead of
+ * waiting out a real threshold.
+ */
+async function withProgress({
+  afterMs,
+  onProgress,
+  run,
+  schedule = setTimeout,
+  cancel = clearTimeout,
+}) {
+  let pending = null;
+  const timer = schedule(() => {
+    pending = Promise.resolve()
+      .then(onProgress)
+      .catch((e) => log.error('gchat progress post failed', { error: e.message }));
+  }, afterMs);
+  try {
+    return await run();
+  } finally {
+    cancel(timer);
+    if (pending) await pending;
+  }
+}
+
+/**
  * Start the Pub/Sub pull subscriber. Returns `{ close, subscription }` so the
  * caller can hook graceful shutdown.
  *
@@ -230,10 +276,20 @@ function startGchat() {
       // administrator can grant — without it every turn took a 403 for no
       // benefit. The session already remembers the rest of the conversation, so
       // no history is supplied.
-      const answer = await converse({
-        sessionKey: key,
-        text: event.argumentText,
-        system: SYSTEM_DIRECTIVE,
+      const answer = await withProgress({
+        afterMs: config.gchatProgressAfterMs,
+        onProgress: () =>
+          postChatReply({
+            spaceName: event.spaceName,
+            threadName: event.threadName,
+            text: PROGRESS_TEXT,
+          }),
+        run: () =>
+          converse({
+            sessionKey: key,
+            text: event.argumentText,
+            system: SYSTEM_DIRECTIVE,
+          }),
       });
       await postChatReply({
         spaceName: event.spaceName,
@@ -273,5 +329,7 @@ module.exports = {
   classify,
   isAllowedSender,
   REFUSAL_TEXT,
+  PROGRESS_TEXT,
+  withProgress,
   startGchat,
 };

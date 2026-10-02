@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 - MINOR version when you add functionality in a backwards-compatible manner, and
 - PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: post a "working on it" notice when a Google Chat turn runs long. A demo turn that investigates and writes code takes minutes, and until now the thread stayed silent the whole time, so a working bot looked dead. The turn now runs under `withProgress`, which arms a timer for `GCHAT_PROGRESS_AFTER_MS` (default 15000) and posts one short in-thread notice if the answer has not landed by then. The timer is cleared the moment the turn settles, so an ordinary turn posts nothing, and an in-flight notice is awaited before the answer so the thread always reads notice-then-answer. A failed notice is logged and never fails the turn. `GCHAT_PROGRESS_AFTER_MS` falls back to 15 s on anything that is not a positive integer — `NaN` reaches `setTimeout` as 0, which would post the notice on every turn.
+
 ## v0.54.3
 
 - refactor: remove the Google Chat thread read. Reading what was said between mentions needs `chat.app.messages.readonly`, a scope a Google Workspace administrator must grant; `chat.bot` cannot list messages (`ACCESS_TOKEN_SCOPE_INSUFFICIENT`), so until that grant landed every turn minted a token, took a 403 from `spaces.messages.list` and logged a warn for no benefit. The read, its scope, its helpers (`readThreadHistory`, `fetchThreadMessages`, `collectThreadMessages`, `threadHistory`, `threadWindow`, `messagesToHistory`) and their tests are gone, and the bot answers from the mention alone — the session already remembers the rest of the conversation. The read never reaches the model, so the turn behaviour is unchanged; what goes away is the per-turn 403 and its warn.
