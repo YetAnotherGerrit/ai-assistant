@@ -10,7 +10,6 @@ const {
   buildCommands,
   commandFor,
   VOICE_DISABLED_REPLY,
-  COMMAND_NAME,
   ADMIN_COMMANDS,
 } = require('./slash-commands');
 const log = require('./log');
@@ -68,6 +67,7 @@ if (config.gchatEnabled) {
 const commands = buildCommands({
   voiceEnabled: config.voiceEnabled,
   mode: config.slashCommandMode,
+  name: config.slashCommandName,
 });
 
 const client = new Client({
@@ -179,13 +179,13 @@ client.on('interactionCreate', async (i) => {
 
   // A command in the other mode's shape is a stale entry from the guild's
   // previous list, and is answered rather than left hanging.
-  const cmd = commandFor(i, config.slashCommandMode);
+  const cmd = commandFor(i, config.slashCommandMode, config.slashCommandName);
   if (cmd === null) {
     return i.reply({
       content:
         config.slashCommandMode === 'single'
-          ? `That command is gone — use \`/${COMMAND_NAME}\` instead.`
-          : `\`/${COMMAND_NAME}\` is gone — its subcommands are top-level commands here.`,
+          ? `That command is gone — use \`/${config.slashCommandName}\` instead.`
+          : `\`/${config.slashCommandName}\` is gone — its subcommands are top-level commands here.`,
       flags: MessageFlags.Ephemeral,
     });
   }

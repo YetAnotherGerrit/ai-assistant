@@ -39,12 +39,17 @@ const VOICE_DISABLED_REPLY =
   'Voice is disabled on this instance — it runs text-only, so there is no voice channel to join.';
 
 /**
- * The one top-level command `single` mode registers. Everything else is a
- * subcommand of it, so the bot occupies a single entry in the guild's command
- * picker instead of a dozen generic names (`/new`, `/status`, `/mode`) that
- * collide with every other bot on the server.
+ * The default name for the one top-level command `single` mode registers.
+ * Everything else is a subcommand of it, so the bot occupies a single entry in
+ * the guild's command picker instead of a dozen generic names (`/new`,
+ * `/status`, `/mode`) that collide with every other bot on the server.
+ *
+ * Overridable per deployment by `SLASH_COMMAND_NAME` (see config.js). Several
+ * assistant identities run from this one codebase, so two of them in one guild
+ * would otherwise both register `/ben` — the exact picker collision the
+ * single-command shape exists to avoid.
  */
-const COMMAND_NAME = 'ben';
+const DEFAULT_COMMAND_NAME = 'ben';
 
 /**
  * The permission a member needs before Discord will SHOW the `multi`-mode
@@ -70,7 +75,7 @@ const ADMIN_PERMISSION = PermissionFlagsBits.ManageGuild;
 
 const ADMIN_COMMANDS = new Set(['new', 'sessions', 'switch']);
 
-function buildCommands({ voiceEnabled, mode = 'multi' }) {
+function buildCommands({ voiceEnabled, mode = 'multi', name = DEFAULT_COMMAND_NAME }) {
   const single = mode === 'single';
   // The two builders share the setName/setDescription/addStringOption surface,
   // so the list below is written once and only the wrapper differs.
@@ -218,7 +223,7 @@ function buildCommands({ voiceEnabled, mode = 'multi' }) {
   // member outside ADMIN_USER_IDS sees the wrapper and is refused on the session
   // subcommands while the voice controls and /status still answer.
   const wrapper = new SlashCommandBuilder()
-    .setName(COMMAND_NAME)
+    .setName(name)
     .setDescription('Talk to and control the assistant');
   for (const sub of subcommands) wrapper.addSubcommand(sub);
   return [wrapper.toJSON()];
@@ -232,18 +237,18 @@ function buildCommands({ voiceEnabled, mode = 'multi' }) {
  * the new one is PUT, so an instance restarted into the other mode can still
  * receive the old shape for a moment.
  */
-function commandFor(interaction, mode) {
+function commandFor(interaction, mode, name = DEFAULT_COMMAND_NAME) {
   if (mode === 'single') {
-    return interaction.commandName === COMMAND_NAME ? interaction.options.getSubcommand() : null;
+    return interaction.commandName === name ? interaction.options.getSubcommand() : null;
   }
-  return interaction.commandName === COMMAND_NAME ? null : interaction.commandName;
+  return interaction.commandName === name ? null : interaction.commandName;
 }
 
 module.exports = {
   buildCommands,
   commandFor,
   VOICE_DISABLED_REPLY,
-  COMMAND_NAME,
+  DEFAULT_COMMAND_NAME,
   ADMIN_PERMISSION,
   ADMIN_COMMANDS,
 };

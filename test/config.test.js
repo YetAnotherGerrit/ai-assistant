@@ -189,6 +189,34 @@ test('an unknown slash command mode fails startup', () => {
   delete require.cache[require.resolve('../src/config')];
 });
 
+// The default is the name the single-command shape has always registered, so a
+// deployment that never heard of SLASH_COMMAND_NAME keeps `/ben` unchanged.
+test('slash command name defaults to ben', () => {
+  delete process.env.SLASH_COMMAND_NAME;
+  delete require.cache[require.resolve('../src/config')];
+  assert.equal(require('../src/config').slashCommandName, 'ben');
+});
+
+test('slash command name accepts a custom name, case- and space-insensitively', () => {
+  process.env.SLASH_COMMAND_NAME = ' SC ';
+  delete require.cache[require.resolve('../src/config')];
+  assert.equal(require('../src/config').slashCommandName, 'sc');
+  delete process.env.SLASH_COMMAND_NAME;
+  delete require.cache[require.resolve('../src/config')];
+});
+
+// Discord refuses an invalid name at registration time, far from the typo that
+// caused it — so it must fail at startup instead, exactly as the mode does.
+test('an invalid slash command name fails startup', () => {
+  for (const bad of ['Ben!', 'has space', 'a.b', 'x'.repeat(33)]) {
+    process.env.SLASH_COMMAND_NAME = bad;
+    delete require.cache[require.resolve('../src/config')];
+    assert.throws(() => require('../src/config'), /SLASH_COMMAND_NAME/, `"${bad}" must be refused`);
+  }
+  delete process.env.SLASH_COMMAND_NAME;
+  delete require.cache[require.resolve('../src/config')];
+});
+
 // The release timeout is named for an EMPTY ROOM, not for silence: the trigger
 // is `humansIn(channel) === 0`. The old name said "idle" and misled exactly that
 // way during the 2026-09-25 live run — the operator sat in the channel expecting

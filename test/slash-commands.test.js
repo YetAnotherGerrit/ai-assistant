@@ -174,13 +174,39 @@ test('the default mode is multi', () => {
 // `single` mode: one top-level command, not a dozen — generic names like /new
 // and /status collide with every other bot on the server.
 test('single mode registers exactly one top-level command, /ben', () => {
-  const { COMMAND_NAME } = require('../src/slash-commands');
-  assert.equal(COMMAND_NAME, 'ben');
+  const { DEFAULT_COMMAND_NAME } = require('../src/slash-commands');
+  assert.equal(DEFAULT_COMMAND_NAME, 'ben');
   for (const voiceEnabled of [true, false]) {
     const commands = buildCommands({ voiceEnabled, mode: 'single' });
     assert.equal(commands.length, 1, `exactly one command (voiceEnabled=${voiceEnabled})`);
-    assert.equal(commands[0].name, 'ben');
+    assert.equal(commands[0].name, DEFAULT_COMMAND_NAME);
   }
+});
+
+// The name is per deployment: several assistant identities run from this one
+// codebase, so two of them in one guild would otherwise both register `/ben` —
+// the picker collision the single-command shape exists to avoid.
+test('single mode takes the top-level command name from the caller', () => {
+  for (const voiceEnabled of [true, false]) {
+    const commands = buildCommands({ voiceEnabled, mode: 'single', name: 'sc' });
+    assert.equal(commands.length, 1, `exactly one command (voiceEnabled=${voiceEnabled})`);
+    assert.equal(commands[0].name, 'sc');
+    assert.equal(commands[0].name === 'ben', false, 'the hard-coded name must not survive');
+  }
+});
+
+test('commandFor matches the configured name, and only in the mode that uses it', () => {
+  const { commandFor } = require('../src/slash-commands');
+  const sub = { getSubcommand: () => 'status' };
+  const sc = { commandName: 'sc', options: sub };
+  const ben = { commandName: 'ben', options: sub };
+  assert.equal(commandFor(sc, 'single', 'sc'), 'status');
+  // A `/ben` still cached from before the rename is the other shape, not a command.
+  assert.equal(commandFor(ben, 'single', 'sc'), null);
+  // In multi mode the name is irrelevant: the wrapper is what is stale, and a
+  // real top-level command resolves as itself.
+  assert.equal(commandFor(sc, 'multi', 'sc'), null);
+  assert.equal(commandFor(ben, 'multi', 'sc'), 'ben');
 });
 
 test('every /ben option is a subcommand', () => {

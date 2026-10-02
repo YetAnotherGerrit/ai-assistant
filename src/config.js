@@ -53,6 +53,10 @@ const WAKE_LEAD_WORDS = [
 
 const SLASH_COMMAND_MODES = ['multi', 'single'];
 
+// Discord's own rule for a command name: 1-32 characters of lowercase letters,
+// digits, hyphen or underscore.
+const SLASH_COMMAND_NAME_PATTERN = /^[a-z0-9_-]{1,32}$/;
+
 function slashCommandMode(v) {
   const mode = (v || 'multi').trim().toLowerCase();
   // Thrown, not defaulted: a typo would otherwise register the shape the
@@ -63,6 +67,20 @@ function slashCommandMode(v) {
     );
   }
   return mode;
+}
+
+function slashCommandName(v) {
+  // Kept in step with DEFAULT_COMMAND_NAME in slash-commands.js by hand — this
+  // module stays data-only and does not reach into the command builders.
+  const name = (v || 'ben').trim().toLowerCase();
+  // Thrown, not defaulted, for the same reason as the mode: Discord refuses an
+  // invalid name at registration time, far from the typo that caused it.
+  if (!SLASH_COMMAND_NAME_PATTERN.test(name)) {
+    throw new Error(
+      `SLASH_COMMAND_NAME must be 1-32 characters of lowercase letters, digits, hyphen or underscore (got "${v}")`,
+    );
+  }
+  return name;
 }
 
 function list(v) {
@@ -171,12 +189,20 @@ const config = {
   slashCommandGuildIds: list(process.env.SLASH_COMMAND_GUILD_IDS),
 
   // The shape of the slash-command surface. `multi` (the default, and the
-  // legacy behaviour) registers every command top-level, hidden behind
-  // ManageGuild. `single` registers one `/ben` command with the same commands
-  // as subcommands, visible to every member — one picker entry instead of a
-  // dozen generic names that collide with other bots. Authorisation
-  // (ALLOWED_USER_IDS / ADMIN_USER_IDS) is identical in both.
+  // legacy behaviour) registers every command top-level, with only the session
+  // commands behind ManageGuild. `single` registers one command with the same
+  // commands as subcommands, visible to every member — one picker entry instead
+  // of a dozen generic names that collide with other bots. The admin tier is
+  // the same set either way (ADMIN_COMMANDS); in `single` mode it is applied to
+  // the RESOLVED subcommand, so the voice controls, /mode and /status stay open
+  // to anyone who passed ALLOWED_USER_IDS.
   slashCommandMode: slashCommandMode(process.env.SLASH_COMMAND_MODE),
+
+  // The name of the one top-level command `single` mode registers. Per
+  // deployment, because several assistant identities run from this codebase and
+  // two of them in one guild would otherwise both register `/ben`. Ignored in
+  // `multi` mode, where every command is top-level and nothing is wrapped.
+  slashCommandName: slashCommandName(process.env.SLASH_COMMAND_NAME),
 
   // How many prior messages a text thread resends. The endpoint may be
   // stateless (MiniMax uses this) or stateful (the shim discards it) — we

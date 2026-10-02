@@ -55,7 +55,7 @@ S2S_MODE=realtime ~/Documents/workspaces/scripts/s2s-minimax
 
 DM the bot to use text. `/join` from a voice channel to use voice, `/leave` to stop. `/cancel` stops the reply currently being spoken without speaking over it — it works whether or not barge-in is enabled, and replies `Nothing is playing right now.` when idle. It stops playback only: the reply is still generated server-side and still reaches the transcript.
 
-With `SLASH_COMMAND_MODE=single` every slash command becomes a subcommand of one top-level command instead — `/ben join`, `/ben status`, `/ben mode` — and that command is visible to every member of the guild. Who may _use_ it does not change: the session commands (`new`, `sessions`, `switch`) still require `ADMIN_USER_IDS`, and every other command stays gated by `ALLOWED_USER_IDS`.
+With `SLASH_COMMAND_MODE=single` every slash command becomes a subcommand of one top-level command instead — `/ben join`, `/ben status`, `/ben mode` — and that command is visible to every member of the guild. Its name is `SLASH_COMMAND_NAME` (default `ben`), so several assistant identities in one guild do not all register the same one. Who may _use_ it does not change: the session commands (`new`, `sessions`, `switch`) still require `ADMIN_USER_IDS`, and every other command stays gated by `ALLOWED_USER_IDS`.
 
 To put Claude Code behind it instead of a hosted model, run `make shim` and point `OPENAI_BASE_URL` at it.
 
@@ -66,6 +66,7 @@ To put Claude Code behind it instead of a hosted model, run `make shim` and poin
 | `ADMIN_USER_IDS`          | —                                 | Comma-separated Discord user IDs allowed to use the session slash commands (`/new`, `/sessions`, `/switch`). A subset of the allowlist; **empty means no admins** |
 | `SLASH_COMMAND_GUILD_IDS` | —                                 | Guilds that get slash commands registered. **Empty means every guild**; listed guilds only, others are sent an empty list                                         |
 | `SLASH_COMMAND_MODE`      | `multi`                           | `multi`: every command top-level. `single`: one command carrying the rest as subcommands, visible to all members                                                  |
+| `SLASH_COMMAND_NAME`      | `ben`                             | Name of that top-level command in `single` mode. Ignored in `multi`. 1–32 chars of `[a-z0-9_-]`                                                                   |
 | `OPENAI_BASE_URL`         | `http://127.0.0.1:8080/v1`        | The swappable endpoint                                                                                                                                            |
 | `OPENAI_MODEL`            | `claude-code`                     | Model name passed through                                                                                                                                         |
 | `S2S_URL`                 | `ws://127.0.0.1:8765/v1/realtime` | speech-to-speech realtime socket                                                                                                                                  |
