@@ -2,7 +2,7 @@
 
 const config = require('./config');
 const log = require('./log');
-const { chat } = require('./llm');
+const { conversationKey, converse } = require('./llm');
 
 /**
  * Google Chat transport — the OPTIONAL second surface of the assistant.
@@ -15,13 +15,28 @@ const { chat } = require('./llm');
  * disjoint from Discord's `thread:`/`dm:`/`channel:`/`voice:` keyspaces, so the
  * two surfaces never share a conversation (goal SC2).
  *
+ * Sender-gated: a message whose address is not on `GCHAT_ALLOWED_EMAILS` gets a
+ * short refusal in-thread and never reaches the session engine, which can read
+ * the Data Assistant vault.
+ *
  * Mirrors the verified Python port (openbrain-googlechatbot, 2026-09-04):
  * envelope parse, session keys, per-message triage verdict log line,
  * threading-aware reply, reply-then-ack (a failed reply nacks → redelivery,
  * no silent drops).
  */
 
-const CHAT_SCOPES = ['https://www.googleapis.com/auth/chat.bot'];
+/**
+ * The scope that posts the reply.
+ *
+ * `chat.bot` is an app-scoped token that needs no administrator approval. There
+ * is deliberately no read scope: listing a thread's messages needs a scope only
+ * a Google Workspace administrator can grant, and `spaces.messages.list` rejects
+ * `chat.bot` outright (`ACCESS_TOKEN_SCOPE_INSUFFICIENT`, verified 2026-10-02).
+ * Without that grant the read took a 403 on every turn for no benefit, so it was
+ * removed and the bot answers from the mention alone. The CHANGELOG entry names
+ * the scope that was dropped.
+ */
+const CHAT_WRITE_SCOPES = ['https://www.googleapis.com/auth/chat.bot'];
 
 const SYSTEM_DIRECTIVE =
   "You are the Data Assistant, the Data Platform team's front door in Google Chat. " +
@@ -69,11 +84,13 @@ function parseEvent(payload) {
  * two surfaces cannot collide on a session (goal SC2).
  */
 function gchatSessionKey(spaceName, threadName) {
-  const identity = config.identity;
   const spaceId = String(spaceName).replace(/\/+$/, '').split('/').pop() || '';
   let threadId = 'space';
   if (threadName) threadId = String(threadName).replace(/\/+$/, '').split('/').pop() || 'space';
-  return `gchat:${spaceId}_${threadId}:${identity}`;
+  // Only the namespace and id are this transport's business; the core builds the
+  // string. `alwaysIdentity` is what keeps the trailing segment even with no
+  // IDENTITY set — see `conversationKey`.
+  return conversationKey('gchat', `${spaceId}_${threadId}`, { alwaysIdentity: true });
 }
 
 /**
@@ -89,18 +106,82 @@ function classify(text) {
 }
 
 /**
+ * What a sender who is not on the allowlist gets back, in-thread.
+ *
+ * Names a human rather than a process: the requester's only useful next step is
+ * to ask for access, and "you are not on the allowlist" alone leaves them with
+ * nowhere to go.
+ */
+const REFUSAL_TEXT =
+  'Sorry, you have to be on the Data Assistant allowlist to use me — ask Benjamin Borbe for access.';
+
+/**
+ * The placeholder posted the moment an allowlisted mention arrives, BEFORE the
+ * shim is called.
+ *
+ * It exists so the thread is never silent while a turn runs — a demo turn that
+ * investigates and writes code takes minutes. Once the turn ends it is edited
+ * into a one-line status (see `turnStatus`) rather than deleted: Chat renders a
+ * tombstone ("Message deleted by its author") for any deleted message, which is
+ * more noise than the placeholder it removed.
+ */
+const THINKING_TEXT = '🤔 thinking…';
+
+/**
+ * The one-line status the placeholder is edited into once the turn ends.
+ *
+ * Carrying the elapsed time is what makes the artifact worth keeping: it is the
+ * one thing the thread cannot otherwise show about a turn that took minutes.
+ * Pure, so a test pins the wording without a clock.
+ */
+function turnStatus({ ms, failed = false }) {
+  // Floor at 1s: "generated in 0s" reads as a bug rather than as "fast".
+  const seconds = Math.max(1, Math.round(ms / 1000));
+  return failed ? `Turn failed after ${seconds}s` : `Answer was generated in ${seconds}s`;
+}
+
+/**
+ * Is this sender allowed to drive the Chat surface?
+ *
+ * Case-insensitive: Google reports the address in the account's own casing
+ * (`Alice@Seibert.Group`), so a byte compare would refuse the very people on
+ * the list. Fails closed — an empty list allows nobody, and a payload carrying
+ * no `chat.user.email` has no sender to match, so it is refused too.
+ *
+ * Lives here rather than on `config` because the guide keeps config data-only
+ * (`node/config/data-not-behaviour`): `config.gchatAllowedEmails` is the data,
+ * this is the rule.
+ */
+function isAllowedSender(email) {
+  const normalized = String(email || '')
+    .trim()
+    .toLowerCase();
+  if (!normalized) return false;
+  return config.gchatAllowedEmails.some((allowed) => allowed.toLowerCase() === normalized);
+}
+
+/**
+ * A bearer token for the Chat API under one scope set.
+ *
+ * Shared by the reply path and the thread-read path so credential handling
+ * exists once. `google-auth-library` is required lazily: a Discord-only
+ * deployment never enables this transport and must not pay for the dependency.
+ */
+async function chatAccessToken(scopes) {
+  const { GoogleAuth } = require('google-auth-library');
+  const auth = new GoogleAuth({ keyFile: config.gchatSaCredentials, scopes });
+  const client = await auth.getClient();
+  const { token } = await client.getAccessToken();
+  return token;
+}
+
+/**
  * Post a text reply via the Chat API, threaded to the source message when
  * possible. Mirrors the Python bot: reply into the existing thread when the
  * event carries a thread name, fall back to a new thread with that name.
  */
 async function postChatReply({ spaceName, threadName, text }) {
-  const { GoogleAuth } = require('google-auth-library');
-  const auth = new GoogleAuth({
-    keyFile: config.gchatSaCredentials,
-    scopes: CHAT_SCOPES,
-  });
-  const client = await auth.getClient();
-  const { token } = await client.getAccessToken();
+  const token = await chatAccessToken(CHAT_WRITE_SCOPES);
 
   const body = { text };
   const params = new URLSearchParams();
@@ -118,6 +199,76 @@ async function postChatReply({ spaceName, threadName, text }) {
   });
   if (!res.ok) throw new Error(`chat api ${res.status}: ${(await res.text()).slice(0, 200)}`);
   return res.json();
+}
+
+/**
+ * Edit a message the app itself posted.
+ *
+ * `chat.bot` covers the app's OWN messages, so the scope that posts also
+ * patches — no user auth, and no second credential path. `updateMask=text` is
+ * required: without it the PATCH is read as a full replace and Chat rejects the
+ * partial body.
+ */
+async function patchChatMessage({ messageName, text }) {
+  const token = await chatAccessToken(CHAT_WRITE_SCOPES);
+  const params = new URLSearchParams({ updateMask: 'text' });
+  const res = await fetch(`https://chat.googleapis.com/v1/${messageName}?${params}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ text }),
+  });
+  if (!res.ok) throw new Error(`chat api ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  return res.json();
+}
+
+/**
+ * Delete a message the app itself posted.
+ *
+ * Used only on the transient-failure path, where the turn is NOT over: Pub/Sub
+ * redelivers it and the retry posts its own placeholder, so a status line left
+ * here would sit beside the retry's 🤔.
+ */
+async function deleteChatMessage({ messageName }) {
+  const token = await chatAccessToken(CHAT_WRITE_SCOPES);
+  const res = await fetch(`https://chat.googleapis.com/v1/${messageName}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) throw new Error(`chat api ${res.status}: ${(await res.text()).slice(0, 200)}`);
+}
+
+/**
+ * Edit the turn's placeholder to its closing status.
+ *
+ * Called only AFTER the outcome message is posted, so a failed answer never
+ * removes the placeholder and leaves the thread silent — the exact failure this
+ * feature exists to prevent.
+ *
+ * Best-effort by design: the answer is already in the thread by the time this
+ * runs, so a failed edit must never turn a delivered answer into a failed turn.
+ * A missing placeholder — its own post failed, so the turn never got one — is a
+ * no-op rather than an error.
+ *
+ * `patch` is injected so a test can assert the call without a Chat API round
+ * trip.
+ */
+async function setPlaceholder(placeholder, text, patch = patchChatMessage) {
+  if (!placeholder?.name) return;
+  await patch({ messageName: placeholder.name, text }).catch((e) =>
+    log.error('gchat placeholder edit failed', { error: e.message }),
+  );
+}
+
+/**
+ * Remove the turn's placeholder — transient failures only, see `deleteChatMessage`.
+ *
+ * `remove` is injected for the same test reason as `setPlaceholder`'s `patch`.
+ */
+async function clearPlaceholder(placeholder, remove = deleteChatMessage) {
+  if (!placeholder?.name) return;
+  await remove({ messageName: placeholder.name }).catch((e) =>
+    log.error('gchat placeholder delete failed', { error: e.message }),
+  );
 }
 
 /**
@@ -146,7 +297,12 @@ function startGchat() {
       return;
     }
     const key = gchatSessionKey(event.spaceName, event.threadName);
-    const verdict = classify(event.argumentText);
+    // The gate runs BEFORE converse(): a turn reaches a Claude Code session with
+    // vault and repo access, so a sender who is not on the list must not get
+    // one. `refused` is its own verdict rather than a classify() result, so the
+    // log line tells a gated sender apart from an ordinary turn.
+    const allowed = isAllowedSender(event.senderEmail);
+    const verdict = allowed ? classify(event.argumentText) : 'refused';
     log.info('gchat message', {
       verdict,
       sender: event.senderEmail,
@@ -154,22 +310,72 @@ function startGchat() {
       thread: event.threadName ?? null,
       sessionKey: key,
     });
+    // The turn's placeholder, once posted. Held out here so the catch can close
+    // it out; stays null while the placeholder post itself is the thing that
+    // failed, which the helpers below treat as a no-op.
+    let placeholder = null;
+    // When the model call started, so the closing status can report how long the
+    // answer took. Null until `converse` is reached.
+    let startedAt = null;
     try {
-      const answer = await chat(
-        [
-          { role: 'system', content: SYSTEM_DIRECTIVE },
-          { role: 'user', content: event.argumentText },
-        ],
-        { sessionKey: key },
-      );
+      if (!allowed) {
+        await postChatReply({
+          spaceName: event.spaceName,
+          threadName: event.threadName,
+          text: REFUSAL_TEXT,
+        });
+        message.ack();
+        return;
+      }
+      // Answer the mention immediately with the placeholder, BEFORE the shim
+      // call. A demo turn takes minutes, and without this the thread is silent
+      // for the whole of it. The answer lands as its own message beside it.
+      placeholder = await postChatReply({
+        spaceName: event.spaceName,
+        threadName: event.threadName,
+        text: THINKING_TEXT,
+      });
+      // Answer from the mention alone. Google Chat delivers only @mentions, and
+      // reading what was said between them needs a scope only a Workspace
+      // administrator can grant — without it every turn took a 403 for no
+      // benefit. The session already remembers the rest of the conversation, so
+      // no history is supplied.
+      startedAt = Date.now();
+      const answer = await converse({
+        sessionKey: key,
+        text: event.argumentText,
+        system: SYSTEM_DIRECTIVE,
+      });
+      const elapsedMs = Date.now() - startedAt;
       await postChatReply({
         spaceName: event.spaceName,
         threadName: event.threadName,
         text: answer,
       });
+      // Only now that the answer is in the thread — see setPlaceholder.
+      await setPlaceholder(placeholder, turnStatus({ ms: elapsedMs }));
       message.ack();
     } catch (e) {
-      log.error('gchat turn failed', { error: e.message });
+      log.error('gchat turn failed', { error: e.message, permanent: Boolean(e.permanent) });
+      const elapsedMs = startedAt === null ? 0 : Date.now() - startedAt;
+      if (e.permanent) {
+        // Retrying cannot fix a misconfiguration, so redelivering only rebuilds
+        // the loop. Ack and say so in-thread rather than going silent. The
+        // notice is best-effort — a failed one must not resurrect the nack.
+        await postChatReply({
+          spaceName: event.spaceName,
+          threadName: event.threadName,
+          text: 'Sorry, the Data Assistant is misconfigured and cannot answer right now.',
+        }).catch((noticeError) =>
+          log.error('gchat error notice failed', { error: noticeError.message }),
+        );
+        await setPlaceholder(placeholder, turnStatus({ ms: elapsedMs, failed: true }));
+        message.ack();
+        return;
+      }
+      // A transient failure is redelivered and the retry posts its own
+      // placeholder, so a status line here would sit beside the retry's 🤔.
+      await clearPlaceholder(placeholder);
       message.nack();
     }
   });
@@ -180,4 +386,17 @@ function startGchat() {
   return { close: () => subscription.close(), subscription };
 }
 
-module.exports = { parseEvent, gchatSessionKey, classify, startGchat };
+module.exports = {
+  parseEvent,
+  gchatSessionKey,
+  classify,
+  isAllowedSender,
+  REFUSAL_TEXT,
+  THINKING_TEXT,
+  turnStatus,
+  patchChatMessage,
+  deleteChatMessage,
+  setPlaceholder,
+  clearPlaceholder,
+  startGchat,
+};

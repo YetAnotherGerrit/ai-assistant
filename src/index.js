@@ -11,6 +11,7 @@ const {
   commandFor,
   VOICE_DISABLED_REPLY,
   COMMAND_NAME,
+  ADMIN_COMMANDS,
 } = require('./slash-commands');
 const log = require('./log');
 const { startHealthServer, isReady } = require('./health');
@@ -194,12 +195,19 @@ client.on('interactionCreate', async (i) => {
     return i.reply({ content: 'Not authorised.', flags: MessageFlags.Ephemeral });
   }
 
-  // The authorisation. In `multi` mode Discord hides the commands from members
-  // without ManageGuild, but hiding is a client affordance: a ManageGuild
-  // holder outside ADMIN_USER_IDS still sees them. In `single` mode /ben is
-  // visible to everyone. Either way this check — not Discord's picker — is
-  // what keeps session and voice control to ADMIN_USER_IDS.
-  if (!config.isAdmin(i.user.id)) {
+  // Defence in depth for the admin tier. ADMIN_COMMANDS carry
+  // setDefaultMemberPermissions, so Discord already hides them from ordinary
+  // members — but hiding is a client affordance, not authorisation. A member who
+  // holds ManageGuild without being in ADMIN_USER_IDS still sees and can invoke
+  // them, and so can anyone whose guild has an Integrations override. This is
+  // the check that actually decides. Every other command is open to anyone
+  // who passed the allowlist above.
+  //
+  // Keyed on the RESOLVED command (`cmd`), never on `i.commandName`: in
+  // `single` mode the interaction names the wrapper, so keying on the wire name
+  // would never match and every subcommand would silently fall through as
+  // public — the session commands included.
+  if (ADMIN_COMMANDS.has(cmd) && !config.isAdmin(i.user.id)) {
     log.warn('slash command refused — not an admin', {
       command: cmd,
       user: i.user.tag,

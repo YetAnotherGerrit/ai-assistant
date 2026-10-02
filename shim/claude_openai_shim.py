@@ -3010,8 +3010,18 @@ class ClaudeProcess:
                         pending += d.get("text", "")
                         emit_sentences()
                 elif ev.get("type") == "content_block_start":
-                    if ev.get("content_block", {}).get("type") == "tool_use":
+                    block = ev.get("content_block", {})
+                    if block.get("type") == "tool_use":
                         tool_seen = True
+                        # One line per tool call, so "the assistant reached
+                        # OpenBrain" is provable from the log instead of
+                        # inferred from the answer text. `print`, not
+                        # `logging`, to match this file: stdout is its log
+                        # surface, and a lone `logging` call would be the
+                        # inconsistent seam. Arguments and results are
+                        # deliberately NOT logged.
+                        print(f"tool_call [{self._key}] {block.get('name')}",
+                              flush=True)
                 elif ev.get("type") == "content_block_stop":
                     emit_sentences(flush=True)
             elif kind == "assistant":

@@ -55,22 +55,22 @@ S2S_MODE=realtime ~/Documents/workspaces/scripts/s2s-minimax
 
 DM the bot to use text. `/join` from a voice channel to use voice, `/leave` to stop. `/cancel` stops the reply currently being spoken without speaking over it — it works whether or not barge-in is enabled, and replies `Nothing is playing right now.` when idle. It stops playback only: the reply is still generated server-side and still reaches the transcript.
 
-With `SLASH_COMMAND_MODE=single` every slash command is a subcommand of one `/ben` instead — `/ben join`, `/ben status`, `/ben mode` — and `/ben` is visible to every member of the guild. Who may _use_ it is unchanged: `ADMIN_USER_IDS` is checked on every invocation in both modes.
+With `SLASH_COMMAND_MODE=single` every slash command becomes a subcommand of one top-level command instead — `/ben join`, `/ben status`, `/ben mode` — and that command is visible to every member of the guild. Who may _use_ it does not change: the session commands (`new`, `sessions`, `switch`) still require `ADMIN_USER_IDS`, and every other command stays gated by `ALLOWED_USER_IDS`.
 
 To put Claude Code behind it instead of a hosted model, run `make shim` and point `OPENAI_BASE_URL` at it.
 
-| Env                       | Default                           | Meaning                                                                                                                   |
-| ------------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `DISCORD_TOKEN`           | —                                 | Bot token (required)                                                                                                      |
-| `ALLOWED_USER_IDS`        | —                                 | Comma-separated Discord user IDs. **Empty means nobody** — it fails closed on purpose                                     |
-| `ADMIN_USER_IDS`          | —                                 | Comma-separated Discord user IDs allowed to use slash commands. A subset of the allowlist; **empty means no admins**      |
-| `SLASH_COMMAND_GUILD_IDS` | —                                 | Guilds that get slash commands registered. **Empty means every guild**; listed guilds only, others are sent an empty list |
-| `SLASH_COMMAND_MODE`      | `multi`                           | `multi`: each command top-level, Manage Server only. `single`: one `/ben` with subcommands, visible to all                |
-| `OPENAI_BASE_URL`         | `http://127.0.0.1:8080/v1`        | The swappable endpoint                                                                                                    |
-| `OPENAI_MODEL`            | `claude-code`                     | Model name passed through                                                                                                 |
-| `S2S_URL`                 | `ws://127.0.0.1:8765/v1/realtime` | speech-to-speech realtime socket                                                                                          |
-| `HEALTH_PORT`             | `8080`                            | `/healthz`, `/readiness`, `/version`                                                                                      |
-| `HISTORY_LIMIT`           | `20`                              | Prior messages resent per text turn                                                                                       |
+| Env                       | Default                           | Meaning                                                                                                                                                           |
+| ------------------------- | --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `DISCORD_TOKEN`           | —                                 | Bot token (required)                                                                                                                                              |
+| `ALLOWED_USER_IDS`        | —                                 | Comma-separated Discord user IDs. **Empty means nobody** — it fails closed on purpose                                                                             |
+| `ADMIN_USER_IDS`          | —                                 | Comma-separated Discord user IDs allowed to use the session slash commands (`/new`, `/sessions`, `/switch`). A subset of the allowlist; **empty means no admins** |
+| `SLASH_COMMAND_GUILD_IDS` | —                                 | Guilds that get slash commands registered. **Empty means every guild**; listed guilds only, others are sent an empty list                                         |
+| `SLASH_COMMAND_MODE`      | `multi`                           | `multi`: every command top-level. `single`: one command carrying the rest as subcommands, visible to all members                                                  |
+| `OPENAI_BASE_URL`         | `http://127.0.0.1:8080/v1`        | The swappable endpoint                                                                                                                                            |
+| `OPENAI_MODEL`            | `claude-code`                     | Model name passed through                                                                                                                                         |
+| `S2S_URL`                 | `ws://127.0.0.1:8765/v1/realtime` | speech-to-speech realtime socket                                                                                                                                  |
+| `HEALTH_PORT`             | `8080`                            | `/healthz`, `/readiness`, `/version`                                                                                                                              |
+| `HISTORY_LIMIT`           | `20`                              | Prior messages resent per text turn                                                                                                                               |
 
 See `local.env.example` for the full set.
 

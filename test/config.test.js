@@ -112,6 +112,33 @@ test('empty ADMIN_USER_IDS means no admins', () => {
   assert.ok(config.isAllowed('111'), 'the mention surface is untouched');
 });
 
+// The Chat surface fails closed the same way the Discord one does: an enabled
+// transport with nobody on its list is a bot that answers no one, and that is a
+// misconfiguration the operator should hear about at boot rather than discover
+// from a colleague's unanswered mention.
+test('check() reports an empty GCHAT_ALLOWED_EMAILS when Chat is enabled', () => {
+  process.env.GCHAT_ENABLED = '1';
+  delete process.env.GCHAT_ALLOWED_EMAILS;
+  delete require.cache[require.resolve('../src/config')];
+  const config = require('../src/config');
+  assert.ok(config.check().some((p) => /GCHAT_ALLOWED_EMAILS/.test(p)));
+  delete process.env.GCHAT_ENABLED;
+});
+
+// The check is gated on GCHAT_ENABLED: a Discord-only instance never sets the
+// Chat list, and reporting it as a problem would make every such deployment
+// look broken.
+test('check() stays quiet about GCHAT_ALLOWED_EMAILS when Chat is disabled', () => {
+  delete process.env.GCHAT_ENABLED;
+  delete process.env.GCHAT_ALLOWED_EMAILS;
+  delete require.cache[require.resolve('../src/config')];
+  const config = require('../src/config');
+  assert.equal(
+    config.check().some((p) => /GCHAT_ALLOWED_EMAILS/.test(p)),
+    false,
+  );
+});
+
 test('admin tier is independent of the allowlist', () => {
   process.env.ALLOWED_USER_IDS = ' 111, 222 ';
   process.env.ADMIN_USER_IDS = ' 111 ';

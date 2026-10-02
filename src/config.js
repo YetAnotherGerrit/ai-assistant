@@ -119,10 +119,22 @@ const config = {
   // typing dots with no answer behind them.
   voiceAlwaysWake: flag(process.env.VOICE_ALWAYS_WAKE, false),
 
-  // Sender-level allowlist, applied to BOTH surfaces. Empty = nobody, on
-  // purpose: this bot can reach a Claude Code session with vault and repo
-  // access, so failing closed is the only safe default.
+  // Discord's sender allowlist — user IDs, and the gate for the DISCORD
+  // surface only (text, voice, slash commands). Empty = nobody, on purpose:
+  // this bot can reach a Claude Code session with vault and repo access, so
+  // failing closed is the only safe default. Google Chat is gated separately
+  // by `gchatAllowedEmails` below: a Discord snowflake can never match a
+  // Google address, so this one list cannot cover both surfaces.
   allowedUserIds: list(process.env.ALLOWED_USER_IDS),
+
+  // Google Chat's sender allowlist — email addresses, the gate for the CHAT
+  // surface. A second list rather than a shared one because the two surfaces
+  // identify people by different keys (Discord user id vs Google address) and
+  // neither key can be matched against the other. Addresses are stored
+  // verbatim; the case-insensitive compare belongs to the consumer
+  // (`gchat.isAllowedSender`), keeping this file data-only. Empty = nobody,
+  // for the same reason as `allowedUserIds`.
+  gchatAllowedEmails: list(process.env.GCHAT_ALLOWED_EMAILS),
 
   // Admin tier, a SUBSET of the allowlist. Gates the slash-command surface
   // (session and voice control) while `allowedUserIds` keeps gating the text /
@@ -367,6 +379,10 @@ config.check = () => {
     if (!config.gchatProject) problems.push('GCHAT_PROJECT is not set (GCHAT_ENABLED=1)');
     if (!config.gchatSaCredentials)
       problems.push('GCHAT_SA_CREDENTIALS is not set (GCHAT_ENABLED=1)');
+    if (!config.gchatAllowedEmails.length)
+      problems.push(
+        'GCHAT_ALLOWED_EMAILS is empty — nobody could talk to the bot (GCHAT_ENABLED=1)',
+      );
   }
   return problems;
 };

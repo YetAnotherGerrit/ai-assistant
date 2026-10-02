@@ -2429,3 +2429,84 @@ class RelayIsWiredThroughTheTurn(unittest.TestCase):
                 self.assertIn("relay_msgs", params)
                 return
         self.fail("ask_claude not found")
+
+
+class ToolCallLogging(unittest.TestCase):
+    """A turn that reaches for a tool must say so in the log.
+
+    The gap this pins (2026-10-02): the shim logged no tool calls at any level.
+    Every line is an unconditional `print()`, the only per-turn line is
+    `{secs}s, {chars} chars`, and no `LOG_LEVEL` adds anything — so "the
+    assistant reached OpenBrain" could not be proven from a live turn, only
+    inferred from the answer text. `Map What the Deployed Data Assistant Can
+    Reach` could not close its second criterion because of it.
+
+    Drives the real `ClaudeProcess.ask` over a synthetic stream instead of
+    asserting on source text: the claim is "this turn emits that line, a plain
+    turn does not", and only running the loop can show it. `on_text` is left
+    None so no sentence is ever spoken — `emit_sentences` returns early on it,
+    which is what keeps this off the audio path entirely.
+    """
+
+    KEY = "thread:12345"
+
+    def _turn(self, events):
+        """Run one turn over `events`; return (printed, answer).
+
+        The answer is returned too, so a negative assertion ("no tool_call
+        line") cannot pass vacuously on a turn that never ran the loop.
+        """
+        proc = object.__new__(shim.ClaudeProcess)
+        proc._key = self.KEY
+        proc._session_id = "00000000-0000-4000-8000-000000000000"
+        proc._last_used = 0.0
+        proc._proc = mock.Mock()          # only stdin.write/flush are reached
+        proc.interrupt = mock.Mock()
+        lines = [json.dumps(e) for e in events] + [None]
+        proc._readline = lambda: lines.pop(0)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            text, _truncated = proc.ask("hello")
+        return buf.getvalue(), text
+
+    @staticmethod
+    def _block(kind, **fields):
+        return {"type": "stream_event",
+                "event": {"type": "content_block_start",
+                          "content_block": {"type": kind, **fields}}}
+
+    def test_a_tool_using_turn_names_the_tool_and_the_session_key(self):
+        out, _ = self._turn([
+            self._block("tool_use", id="tu_1", input={},
+                        name="mcp__openbrain__search_related"),
+            {"type": "stream_event", "event": {"type": "content_block_stop"}},
+            {"type": "result", "result": "done"},
+        ])
+        self.assertIn(
+            f"tool_call [{self.KEY}] mcp__openbrain__search_related", out)
+
+    def test_each_tool_call_gets_its_own_line(self):
+        # Not one line per TURN: a turn that reaches for two tools has to name
+        # both, or the log answers "did it reach OpenBrain" and not "what did
+        # it reach for".
+        out, _ = self._turn([
+            self._block("tool_use", id="tu_1", input={},
+                        name="mcp__openbrain__search_related"),
+            self._block("tool_use", id="tu_2", input={},
+                        name="mcp__openbrain__get_content"),
+            {"type": "result", "result": "done"},
+        ])
+        self.assertEqual(out.count("tool_call"), 2)
+
+    def test_a_plain_turn_logs_no_tool_call(self):
+        out, text = self._turn([
+            {"type": "stream_event",
+             "event": {"type": "content_block_delta",
+                       "delta": {"type": "text_delta", "text": "hello there."}}},
+            {"type": "stream_event", "event": {"type": "content_block_stop"}},
+            {"type": "result", "result": "hello there."},
+        ])
+        # The turn really ran — otherwise "no tool_call line" would hold for a
+        # loop that never executed a single event.
+        self.assertEqual(text, "hello there.")
+        self.assertNotIn("tool_call", out)

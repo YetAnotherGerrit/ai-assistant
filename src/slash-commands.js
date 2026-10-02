@@ -60,8 +60,15 @@ const COMMAND_NAME = 'ben';
  * whether or not they are in ADMIN_USER_IDS — which is why index.js still
  * checks config.isAdmin before acting. Hiding is a UX affordance; the id check
  * is the actual authorisation.
+ *
+ * Applied only to ADMIN_COMMANDS. Those switch or spawn Claude Code sessions;
+ * the rest (voice controls, /mode, /status) act on the caller's own
+ * conversation and are visible to every member — still gated by
+ * ALLOWED_USER_IDS in index.js, so visible is not the same as usable.
  */
 const ADMIN_PERMISSION = PermissionFlagsBits.ManageGuild;
+
+const ADMIN_COMMANDS = new Set(['new', 'sessions', 'switch']);
 
 function buildCommands({ voiceEnabled, mode = 'multi' }) {
   const single = mode === 'single';
@@ -195,22 +202,26 @@ function buildCommands({ voiceEnabled, mode = 'multi' }) {
   );
 
   if (!single) {
-    // Applied to every command, not a subset: the whole slash surface is
-    // session and voice control, and there is no command here an ordinary user
-    // should reach. The mention surface is what they get, and it is not built
-    // here.
-    return subcommands.map((c) => c.setDefaultMemberPermissions(ADMIN_PERMISSION).toJSON());
+    // The tier master introduced, unchanged: only ADMIN_COMMANDS carry the
+    // ManageGuild gate; everything else registers with null, which is explicit
+    // "everyone" — spelled out so the public tier reads as a decision, not an
+    // omission. Those commands act on the caller's own conversation and stay
+    // gated by ALLOWED_USER_IDS in index.js.
+    return subcommands.map((c) =>
+      c.setDefaultMemberPermissions(ADMIN_COMMANDS.has(c.name) ? ADMIN_PERMISSION : null).toJSON(),
+    );
   }
 
-  // Deliberately NO setDefaultMemberPermissions: /ben is visible to every
-  // member of the guild. Visibility is not authorisation — index.js still
-  // checks config.isAllowed and config.isAdmin before acting on any subcommand,
-  // so a member outside ADMIN_USER_IDS sees /ben and is refused on the wire.
-  const ben = new SlashCommandBuilder()
+  // Deliberately NO setDefaultMemberPermissions: the wrapper is visible to every
+  // member of the guild. Visibility is not authorisation — index.js still checks
+  // config.isAllowed, and applies ADMIN_COMMANDS to the RESOLVED subcommand, so a
+  // member outside ADMIN_USER_IDS sees the wrapper and is refused on the session
+  // subcommands while the voice controls and /status still answer.
+  const wrapper = new SlashCommandBuilder()
     .setName(COMMAND_NAME)
     .setDescription('Talk to and control the assistant');
-  for (const sub of subcommands) ben.addSubcommand(sub);
-  return [ben.toJSON()];
+  for (const sub of subcommands) wrapper.addSubcommand(sub);
+  return [wrapper.toJSON()];
 }
 
 /**
@@ -234,4 +245,5 @@ module.exports = {
   VOICE_DISABLED_REPLY,
   COMMAND_NAME,
   ADMIN_PERMISSION,
+  ADMIN_COMMANDS,
 };

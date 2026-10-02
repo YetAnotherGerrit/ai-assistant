@@ -19,6 +19,36 @@ function controlAuth() {
 }
 
 /**
+ * Does this deployment hold a real credential?
+ *
+ * `config.apiKey` defaults to the literal `not-needed`, which is the sentinel
+ * for "no key configured at all" — it exists so a local run against a shim that
+ * does not check can proceed. That sentinel is NOT a credential, and sending it
+ * earns a refusal the caller then retries. So there are exactly two real ones:
+ * a configured CHAT_BRIDGE_TOKEN (the Claude Code shim) or a real
+ * OPENAI_API_KEY (an OpenAI-compatible backend such as MiniMax).
+ */
+function hasCredential() {
+  return Boolean(config.chatBridgeToken) || config.apiKey !== 'not-needed';
+}
+
+/**
+ * An error retrying cannot fix.
+ *
+ * The transports nack on failure so Pub/Sub redelivers — right for a transient
+ * outage, wrong for a misconfiguration: a missing credential, or one the shim
+ * refuses, reproduces identically on every redelivery, so the bot fetches in a
+ * loop for as long as the message lives (observed 2026-10-02: ~2 turns/s for
+ * minutes, with the shim logging a refusal per attempt). `permanent` is how a
+ * transport tells the two apart and acks instead of nacking.
+ */
+function permanentError(message) {
+  const err = new Error(message);
+  err.permanent = true;
+  return err;
+}
+
+/**
  * Minimal OpenAI chat-completions client.
  *
  * Deliberately assumes NOTHING about server statefulness: it sends the full
@@ -32,6 +62,16 @@ function controlAuth() {
  * two threads run concurrently instead of queueing behind one another.
  */
 async function chat(messages, { sessionKey, signal } = {}) {
+  // Refuse BEFORE fetching. With no credential there is nothing to
+  // authenticate with, so the request can only ever be refused — and every
+  // refusal nacks, which redelivers, which refuses again.
+  if (!hasCredential()) {
+    throw permanentError(
+      'no credential configured — set CHAT_BRIDGE_TOKEN (Claude Code shim) or ' +
+        'OPENAI_API_KEY (OpenAI-compatible backend); refusing to fetch',
+    );
+  }
+
   const res = await fetch(`${config.baseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
@@ -49,13 +89,44 @@ async function chat(messages, { sessionKey, signal } = {}) {
 
   if (!res.ok) {
     const body = await res.text().catch(() => '');
-    throw new Error(`endpoint ${res.status}: ${body.slice(0, 200)}`);
+    const message = `endpoint ${res.status}: ${body.slice(0, 200)}`;
+    // 401/403 is the shim refusing the credential, not a hiccup — the identical
+    // request is refused identically on every redelivery, so retrying only
+    // rebuilds the loop. Anything else may be transient and still retries.
+    throw res.status === 401 || res.status === 403 ? permanentError(message) : new Error(message);
   }
 
   const data = await res.json();
   const text = data?.choices?.[0]?.message?.content;
   if (!text) throw new Error(`no content in response: ${JSON.stringify(data).slice(0, 200)}`);
   return text.trim();
+}
+
+/**
+ * One conversation turn: assemble the prompt, ask the model, return the reply.
+ *
+ * This is the seam. A transport receives an event, resolves its conversation
+ * key from its own channel context, supplies whatever history it could read
+ * from that channel plus the inbound text — and gets back the answer to send.
+ * It never touches the model endpoint, the shape of a session key, or the
+ * ordering of the prompt.
+ *
+ * `system` is the transport's own channel directive, when it has one: Google
+ * Chat tells the assistant to answer plainly, Discord supplies none and relies
+ * on the shim's default.
+ *
+ * `history` may already end with the inbound message — a transport that reads
+ * history back from the channel will have fetched it there. The duplicate is
+ * dropped rather than sent twice, which is what the Discord path relied on
+ * before this function existed.
+ */
+async function converse({ sessionKey, history = [], text, system, signal }) {
+  const messages = system ? [{ role: 'system', content: system }] : [];
+  messages.push(...history);
+  if (text != null && messages.at(-1)?.content !== text) {
+    messages.push({ role: 'user', content: text });
+  }
+  return chat(messages, { sessionKey, signal });
 }
 
 /**
@@ -477,7 +548,27 @@ function sessionKeyFor(channel, userId) {
  */
 function voiceKeyFor(guildId) {
   if (!guildId) return DEFAULT_SESSION_KEY;
-  return config.identity ? `voice:${guildId}:${config.identity}` : `voice:${guildId}`;
+  return conversationKey('voice', guildId);
+}
+
+/**
+ * The key scheme, in one place: `<namespace>:<id>`, with the process identity
+ * appended when `IDENTITY` is set.
+ *
+ * A transport does not build this string. It resolves the namespace and the id
+ * from its own channel context and asks for the key, so a new channel adds no
+ * keying code, and whether two channels' keyspaces stay disjoint is decided
+ * here rather than re-derived per adapter.
+ *
+ * `alwaysIdentity` keeps the trailing segment when `IDENTITY` is unset. Google
+ * Chat needs it: its key is defined as exactly three colon segments so the
+ * shim's `identity_for()` — which reads the last segment — cannot mistake the
+ * space/thread id for the identity, which a two-segment `gchat:<id>` would make
+ * it do.
+ */
+function conversationKey(namespace, id, { alwaysIdentity = false } = {}) {
+  if (config.identity) return `${namespace}:${id}:${config.identity}`;
+  return alwaysIdentity ? `${namespace}:${id}:` : `${namespace}:${id}`;
 }
 
 /**
@@ -504,11 +595,14 @@ function voiceKeyFor(guildId) {
  * see `identity_for()` in the shim.
  */
 function textKeyFor(prefix, id) {
-  return config.identity ? `${prefix}:${id}:${config.identity}` : `${prefix}:${id}`;
+  return conversationKey(prefix, id);
 }
 
 module.exports = {
   chat,
+  hasCredential,
+  converse,
+  conversationKey,
   markTypedTurn,
   resetSession,
   listSessions,

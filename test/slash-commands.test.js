@@ -133,18 +133,22 @@ for (const mode of MODES) {
   });
 }
 
-// `multi` mode, the legacy surface. Discord hides a command from anyone lacking this permission. Asserted on
-// EVERY command rather than a sampled one: the whole slash surface is session
-// and voice control, and a single command shipped without the field is
-// silently visible to every member of the guild.
-test('every multi-mode command carries the admin permission gate', () => {
-  const { ADMIN_PERMISSION } = require('../src/slash-commands');
+// `multi` mode, the legacy surface. Discord hides a command from anyone lacking
+// this permission. Asserted on EVERY command in both directions: an admin
+// command shipped without the field is silently visible to the whole guild, and
+// a public one shipped with it is silently hidden from the people it was opened
+// for. (`single` mode has no per-command gate to assert — the wrapper is
+// deliberately ungated; see the `/ben` test below.)
+test('only the session commands carry the admin permission gate', () => {
+  const { ADMIN_PERMISSION, ADMIN_COMMANDS } = require('../src/slash-commands');
+  assert.deepEqual([...ADMIN_COMMANDS].sort(), ['new', 'sessions', 'switch']);
   for (const voiceEnabled of [true, false]) {
     for (const c of buildCommands({ voiceEnabled, mode: 'multi' })) {
+      const want = ADMIN_COMMANDS.has(c.name) ? String(ADMIN_PERMISSION) : null;
       assert.equal(
         c.default_member_permissions,
-        String(ADMIN_PERMISSION),
-        `${c.name} must be permission-gated (voiceEnabled=${voiceEnabled})`,
+        want,
+        `${c.name} permission gate (voiceEnabled=${voiceEnabled})`,
       );
     }
   }
