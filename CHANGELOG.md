@@ -8,6 +8,11 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 - MINOR version when you add functionality in a backwards-compatible manner, and
 - PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: gate the Google Chat transport on a sender allowlist. `GCHAT_ALLOWED_EMAILS` (comma-separated, matched case-insensitively) names the addresses that may drive the Chat surface; a message from anyone else gets a short refusal in-thread and never reaches the session engine, which runs Claude Code in a clone of the Data Assistant vault. The per-message log line carries `verdict: refused` for a gated sender, so a refusal is distinguishable from an ordinary turn. The list is deliberately separate from `ALLOWED_USER_IDS`, which holds Discord user IDs and keeps gating the Discord surface — a snowflake can never match a Google address, so the `config.js` comment claiming one list covered both surfaces was wrong and is corrected. Fails closed: an unset or empty list admits nobody, and `config.check()` reports the empty list as a problem while `GCHAT_ENABLED=1`.
+- fix: bump three transitive dependencies past newly-published high-severity advisories — `@grpc/grpc-js` 1.14.4 → 1.14.5, `brace-expansion` 1.1.18 → 1.1.21, `undici` 6.28.0 → 6.29.0. `make precommit`'s `npm audit --audit-level=high` step had gone red against the unchanged lockfile, because the advisories were published after the last green run on 2026-09-26; that blocked CI on every PR in this repo. Semver-compatible bumps only — no `--force`.
+
 ## v0.52.0
 
 - feat: open the non-session slash commands to every member. Only `/new`, `/sessions` and `/switch` stay behind `ManageGuild` visibility and the `ADMIN_USER_IDS` check (`ADMIN_COMMANDS`); `/join`, `/leave`, `/cancel`, `/wakephrase`, `/interrupt`, `/transcribe`, `/mode` and `/status` register with `default_member_permissions: null`, so non-admins on a guild see them. They remain gated by `ALLOWED_USER_IDS`.

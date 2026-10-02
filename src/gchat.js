@@ -15,6 +15,10 @@ const { chat } = require('./llm');
  * disjoint from Discord's `thread:`/`dm:`/`channel:`/`voice:` keyspaces, so the
  * two surfaces never share a conversation (goal SC2).
  *
+ * Sender-gated: a message whose address is not on `GCHAT_ALLOWED_EMAILS` gets a
+ * short refusal in-thread and never reaches the session engine, which can read
+ * the Data Assistant vault.
+ *
  * Mirrors the verified Python port (openbrain-googlechatbot, 2026-09-04):
  * envelope parse, session keys, per-message triage verdict log line,
  * threading-aware reply, reply-then-ack (a failed reply nacks → redelivery,
@@ -89,6 +93,36 @@ function classify(text) {
 }
 
 /**
+ * What a sender who is not on the allowlist gets back, in-thread.
+ *
+ * Names a human rather than a process: the requester's only useful next step is
+ * to ask for access, and "you are not on the allowlist" alone leaves them with
+ * nowhere to go.
+ */
+const REFUSAL_TEXT =
+  'Sorry, you have to be on the Data Assistant allowlist to use me — ask Benjamin Borbe for access.';
+
+/**
+ * Is this sender allowed to drive the Chat surface?
+ *
+ * Case-insensitive: Google reports the address in the account's own casing
+ * (`Alice@Seibert.Group`), so a byte compare would refuse the very people on
+ * the list. Fails closed — an empty list allows nobody, and a payload carrying
+ * no `chat.user.email` has no sender to match, so it is refused too.
+ *
+ * Lives here rather than on `config` because the guide keeps config data-only
+ * (`node/config/data-not-behaviour`): `config.gchatAllowedEmails` is the data,
+ * this is the rule.
+ */
+function isAllowedSender(email) {
+  const normalized = String(email || '')
+    .trim()
+    .toLowerCase();
+  if (!normalized) return false;
+  return config.gchatAllowedEmails.some((allowed) => allowed.toLowerCase() === normalized);
+}
+
+/**
  * Post a text reply via the Chat API, threaded to the source message when
  * possible. Mirrors the Python bot: reply into the existing thread when the
  * event carries a thread name, fall back to a new thread with that name.
@@ -146,7 +180,12 @@ function startGchat() {
       return;
     }
     const key = gchatSessionKey(event.spaceName, event.threadName);
-    const verdict = classify(event.argumentText);
+    // The gate runs BEFORE chat(): a turn reaches a Claude Code session with
+    // vault and repo access, so a sender who is not on the list must not get
+    // one. `refused` is its own verdict rather than a classify() result, so the
+    // log line tells a gated sender apart from an ordinary turn.
+    const allowed = isAllowedSender(event.senderEmail);
+    const verdict = allowed ? classify(event.argumentText) : 'refused';
     log.info('gchat message', {
       verdict,
       sender: event.senderEmail,
@@ -155,6 +194,15 @@ function startGchat() {
       sessionKey: key,
     });
     try {
+      if (!allowed) {
+        await postChatReply({
+          spaceName: event.spaceName,
+          threadName: event.threadName,
+          text: REFUSAL_TEXT,
+        });
+        message.ack();
+        return;
+      }
       const answer = await chat(
         [
           { role: 'system', content: SYSTEM_DIRECTIVE },
@@ -180,4 +228,11 @@ function startGchat() {
   return { close: () => subscription.close(), subscription };
 }
 
-module.exports = { parseEvent, gchatSessionKey, classify, startGchat };
+module.exports = {
+  parseEvent,
+  gchatSessionKey,
+  classify,
+  isAllowedSender,
+  REFUSAL_TEXT,
+  startGchat,
+};
