@@ -9,14 +9,7 @@ const assert = require('node:assert');
 process.env.IDENTITY = 'data';
 delete require.cache[require.resolve('../src/config')];
 delete require.cache[require.resolve('../src/gchat')];
-const {
-  parseEvent,
-  gchatSessionKey,
-  classify,
-  ANSWERED_TEXT,
-  FAILED_TEXT,
-  markPlaceholder,
-} = require('../src/gchat');
+const { parseEvent, gchatSessionKey, classify, clearPlaceholder } = require('../src/gchat');
 
 const CHAT_EVENT = {
   commonEventObject: { hostApp: 'CHAT', platform: 'WEB' },
@@ -124,37 +117,36 @@ test('isAllowedSender refuses a message that carries no sender address', () => {
 delete process.env.GCHAT_ALLOWED_EMAILS;
 
 // The turn placeholder. It answers the mention immediately, so a multi-minute
-// turn never looks dead, and is then edited in place to a one-character marker
-// rather than deleted — the thread keeps its shape, and the placeholder's
-// position is where the turn happened. The edit is best-effort: the answer is
-// already posted beside it by the time it runs, so a failed edit must never
-// turn a delivered answer into a failed turn.
-test('markPlaceholder edits the placeholder to the marker', async () => {
+// turn never looks dead, and is removed once the turn ends — so every turn
+// leaves exactly one message behind: the answer, or the failure notice. The
+// delete is best-effort: the answer is already posted by the time it runs, so a
+// failed delete must never turn a delivered answer into a failed turn.
+test('clearPlaceholder deletes the placeholder', async () => {
   const calls = [];
-  await markPlaceholder({ name: 'spaces/AAA/messages/1' }, ANSWERED_TEXT, async (args) => {
+  await clearPlaceholder({ name: 'spaces/AAA/messages/1' }, async (args) => {
     calls.push(args);
   });
 
-  assert.deepEqual(calls, [{ messageName: 'spaces/AAA/messages/1', text: ANSWERED_TEXT }]);
+  assert.deepEqual(calls, [{ messageName: 'spaces/AAA/messages/1' }]);
 });
 
-test('markPlaceholder is a no-op when the turn never got a placeholder', async () => {
+test('clearPlaceholder is a no-op when the turn never got a placeholder', async () => {
   const calls = [];
-  const patch = async (args) => {
+  const remove = async (args) => {
     calls.push(args);
   };
-  await markPlaceholder(null, FAILED_TEXT, patch);
-  await markPlaceholder(undefined, FAILED_TEXT, patch);
-  await markPlaceholder({}, FAILED_TEXT, patch);
+  await clearPlaceholder(null, remove);
+  await clearPlaceholder(undefined, remove);
+  await clearPlaceholder({}, remove);
 
-  assert.deepEqual(calls, [], 'nothing to edit — no call, and no error either');
+  assert.deepEqual(calls, [], 'nothing to delete — no call, and no error either');
 });
 
-test('markPlaceholder swallows a failed edit', async () => {
+test('clearPlaceholder swallows a failed delete', async () => {
   await assert.doesNotReject(
-    markPlaceholder({ name: 'spaces/AAA/messages/1' }, ANSWERED_TEXT, async () => {
+    clearPlaceholder({ name: 'spaces/AAA/messages/1' }, async () => {
       throw new Error('chat api 500');
     }),
-    'a delivered answer must survive a failed marker edit',
+    'a delivered answer must survive a failed placeholder delete',
   );
 });

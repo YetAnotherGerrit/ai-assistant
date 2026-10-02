@@ -120,21 +120,12 @@ const REFUSAL_TEXT =
  * shim is called.
  *
  * It exists so the thread is never silent while a turn runs — a demo turn that
- * investigates and writes code takes minutes. It is edited in place to one of
- * the markers below rather than deleted, so the thread keeps its shape: the
- * placeholder's position is where the turn happened.
+ * investigates and writes code takes minutes. It is removed once the turn ends,
+ * whatever the outcome, so every turn leaves exactly one message behind: the
+ * answer, or the failure notice. A marker edited in its place would be a second
+ * artifact per turn, and the outcome message already says what happened.
  */
 const THINKING_TEXT = '🤔 thinking…';
-
-/**
- * Terminal markers the placeholder is edited to.
- *
- * One character each. By the time it carries one the placeholder has already
- * done its job, and a sentence here would read as a second answer competing
- * with the real one posted beside it.
- */
-const ANSWERED_TEXT = '💡';
-const FAILED_TEXT = '⚠️';
 
 /**
  * Is this sender allowed to drive the Chat surface?
@@ -198,40 +189,40 @@ async function postChatReply({ spaceName, threadName, text }) {
 }
 
 /**
- * Edit a message the app itself posted.
+ * Delete a message the app itself posted.
  *
- * `chat.bot` covers the app's OWN messages, so the scope that posts also
- * patches — no user auth, and no second credential path. `updateMask=text` is
- * required: without it the PATCH is read as a full replace and Chat rejects the
- * partial body.
+ * `chat.bot` covers the app's OWN messages — the Chat API restricts app auth on
+ * this route to messages created by the calling app — so the scope that posts
+ * also deletes, with no user auth and no second credential path.
  */
-async function patchChatMessage({ messageName, text }) {
+async function deleteChatMessage({ messageName }) {
   const token = await chatAccessToken(CHAT_WRITE_SCOPES);
-  const params = new URLSearchParams({ updateMask: 'text' });
-  const res = await fetch(`https://chat.googleapis.com/v1/${messageName}?${params}`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ text }),
+  const res = await fetch(`https://chat.googleapis.com/v1/${messageName}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${token}` },
   });
   if (!res.ok) throw new Error(`chat api ${res.status}: ${(await res.text()).slice(0, 200)}`);
-  return res.json();
 }
 
 /**
- * Edit the turn's placeholder to its terminal marker.
+ * Remove the turn's placeholder, once the turn has ended.
+ *
+ * Called only AFTER the outcome message is posted, so a failed answer never
+ * removes the placeholder and leaves the thread silent — the exact failure this
+ * feature exists to prevent.
  *
  * Best-effort by design: the answer is already in the thread by the time this
- * runs, so a failed edit must never turn a delivered answer into a failed turn.
- * A missing placeholder — its own post failed, so the turn never got one — is a
- * no-op rather than an error.
+ * runs, so a failed delete must never turn a delivered answer into a failed
+ * turn. A missing placeholder — its own post failed, so the turn never got one
+ * — is a no-op rather than an error.
  *
- * `patch` is injected so a test can assert the call without a Chat API round
+ * `remove` is injected so a test can assert the call without a Chat API round
  * trip.
  */
-async function markPlaceholder(placeholder, text, patch = patchChatMessage) {
+async function clearPlaceholder(placeholder, remove = deleteChatMessage) {
   if (!placeholder?.name) return;
-  await patch({ messageName: placeholder.name, text }).catch((e) =>
-    log.error('gchat placeholder edit failed', { error: e.message }),
+  await remove({ messageName: placeholder.name }).catch((e) =>
+    log.error('gchat placeholder delete failed', { error: e.message }),
   );
 }
 
@@ -276,7 +267,7 @@ function startGchat() {
     });
     // The turn's placeholder, once posted. Held out here so the catch can edit
     // it to its terminal marker; stays null while the placeholder post itself is
-    // the thing that failed, which `markPlaceholder` treats as a no-op.
+    // the thing that failed, which `clearPlaceholder` treats as a no-op.
     let placeholder = null;
     try {
       if (!allowed) {
@@ -311,7 +302,8 @@ function startGchat() {
         threadName: event.threadName,
         text: answer,
       });
-      await markPlaceholder(placeholder, ANSWERED_TEXT);
+      // Only now that the answer is in the thread — see clearPlaceholder.
+      await clearPlaceholder(placeholder);
       message.ack();
     } catch (e) {
       log.error('gchat turn failed', { error: e.message, permanent: Boolean(e.permanent) });
@@ -326,13 +318,13 @@ function startGchat() {
         }).catch((noticeError) =>
           log.error('gchat error notice failed', { error: noticeError.message }),
         );
-        await markPlaceholder(placeholder, FAILED_TEXT);
+        await clearPlaceholder(placeholder);
         message.ack();
         return;
       }
-      // A transient failure is redelivered, so the retry will answer — but the
-      // placeholder must not keep claiming the turn is still running.
-      await markPlaceholder(placeholder, FAILED_TEXT);
+      // A transient failure is redelivered, and the redelivery posts its own
+      // placeholder — so this one goes, rather than being left beside it.
+      await clearPlaceholder(placeholder);
       message.nack();
     }
   });
@@ -350,9 +342,7 @@ module.exports = {
   isAllowedSender,
   REFUSAL_TEXT,
   THINKING_TEXT,
-  ANSWERED_TEXT,
-  FAILED_TEXT,
-  patchChatMessage,
-  markPlaceholder,
+  deleteChatMessage,
+  clearPlaceholder,
   startGchat,
 };
