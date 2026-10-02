@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 - MINOR version when you add functionality in a backwards-compatible manner, and
 - PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- docs: add `docs/conversation-seam.md`, naming the transport/conversation seam — what the conversation core owns (the keying scheme, history assembly, the model call, the reply) and what a transport owns (receiving an event, resolving a conversation key, supplying the history it can read, sending a reply), plus the behaviours the extraction must preserve.
+
 ## v0.52.0
 
 - feat: open the non-session slash commands to every member. Only `/new`, `/sessions` and `/switch` stay behind `ManageGuild` visibility and the `ADMIN_USER_IDS` check (`ADMIN_COMMANDS`); `/join`, `/leave`, `/cancel`, `/wakephrase`, `/interrupt`, `/transcribe`, `/mode` and `/status` register with `default_member_permissions: null`, so non-admins on a guild see them. They remain gated by `ALLOWED_USER_IDS`.
