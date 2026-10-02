@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 - MINOR version when you add functionality in a backwards-compatible manner, and
 - PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.54.1
 
 - refactor: make the Google Chat thread read's failure guarantee explicit and tested. The read now lives in `readThreadHistory()`, which absorbs every failure and returns an empty history — so a `spaces.messages.list` 403 (the ordinary case until a Workspace administrator grants `chat.app.messages.readonly`) leaves the turn answering with the mention alone, and the log carrying `fetched 0 messages`. Behaviour is unchanged; what changes is that the guarantee no longer rests on a `try/catch` inside the Pub/Sub message handler, where a later refactor could drop it and turn a refused read into a nack and a Pub/Sub redelivery loop. Three tests cover the refused read, an arbitrary network failure, and the successful path.
 
