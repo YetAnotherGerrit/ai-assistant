@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 - MINOR version when you add functionality in a backwards-compatible manner, and
 - PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.54.2
 
 - fix: never fetch a turn without a credential, and stop retrying one the shim refuses. `controlAuth()` falls back to `config.apiKey`, which defaults to the literal sentinel `not-needed` — so a deployment with neither `CHAT_BRIDGE_TOKEN` nor a real `OPENAI_API_KEY` sent `Bearer not-needed` on every turn, the shim's mutating-route guard refused it (401/400), and the Google Chat handler nacked, which redelivers, which refuses again: ~2 turns/s until the message died (observed 2026-10-02, with the shim logging a refusal per attempt). `chat()` now throws before fetching when `hasCredential()` is false, and a 401/403 is marked `permanent` so the Chat transport acks and posts a short in-thread notice instead of rebuilding the loop. A real `OPENAI_API_KEY` still fetches, so the OpenAI-compatible backend path is unchanged.
 
