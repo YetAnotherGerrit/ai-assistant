@@ -666,6 +666,14 @@ test('alwaysIdentity keeps the trailing segment with IDENTITY unset — the Goog
 /** Stub the model endpoint and hand back the body it was sent. */
 async function converseWith(args) {
   const realFetch = globalThis.fetch;
+  // A credential, because `chat()` now refuses to fetch without one. These
+  // tests are about what `converse()` SENDS, not about the guard — the guard
+  // has its own tests below. Both caches are busted so the fresh config sees
+  // it: `llm` captures `config` at load.
+  const realToken = process.env.CHAT_BRIDGE_TOKEN;
+  process.env.CHAT_BRIDGE_TOKEN = 'test-token';
+  delete require.cache[require.resolve('../src/config')];
+  delete require.cache[require.resolve('../src/llm')];
   let sent;
   try {
     globalThis.fetch = async (_url, opts) => {
@@ -677,6 +685,10 @@ async function converseWith(args) {
     return { reply, messages: sent.messages };
   } finally {
     globalThis.fetch = realFetch;
+    if (realToken === undefined) delete process.env.CHAT_BRIDGE_TOKEN;
+    else process.env.CHAT_BRIDGE_TOKEN = realToken;
+    delete require.cache[require.resolve('../src/config')];
+    delete require.cache[require.resolve('../src/llm')];
   }
 }
 
@@ -721,3 +733,93 @@ test('converse puts the transport system directive first, and returns the reply'
   const without = await converseWith({ sessionKey: 'thread:T1', text: 'hi' });
   assert.deepEqual(without.messages, [{ role: 'user', content: 'hi' }]);
 });
+
+// The credential guard.
+//
+// The dev deployment had neither CHAT_BRIDGE_TOKEN nor OPENAI_API_KEY, so
+// `controlAuth()` fell back to the literal sentinel `not-needed`, the shim's
+// mutating-route guard refused it, and the gchat handler nacked — which
+// redelivers, which refuses again, ~2 turns/s until the message died. Two
+// things stop that: never fetch without a credential, and mark a REFUSED
+// credential permanent so the transport acks instead of nacking.
+//
+// Both halves are asserted against a recording stub, because "it threw" is not
+// the claim — "it never touched the network" is.
+
+function loadLlmWith(env) {
+  for (const [key, value] of Object.entries(env)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  delete require.cache[require.resolve('../src/config')];
+  delete require.cache[require.resolve('../src/llm')];
+  return require('../src/llm');
+}
+
+function recordingFetch(impl) {
+  const calls = [];
+  const original = global.fetch;
+  global.fetch = async (...args) => {
+    calls.push(args);
+    return impl(...args);
+  };
+  return {
+    calls,
+    restore: () => {
+      global.fetch = original;
+    },
+  };
+}
+
+const okBody = JSON.stringify({ choices: [{ message: { content: 'ok' } }] });
+
+test('chat refuses without a credential and never reaches the network', async () => {
+  const { chat } = loadLlmWith({ CHAT_BRIDGE_TOKEN: undefined, OPENAI_API_KEY: undefined });
+  const stub = recordingFetch(async () => new Response(okBody, { status: 200 }));
+  try {
+    await assert.rejects(() => chat([{ role: 'user', content: 'hi' }]), /no credential configured/);
+    assert.equal(stub.calls.length, 0, 'the whole point: nothing was fetched');
+  } finally {
+    stub.restore();
+  }
+});
+
+test('a real OPENAI_API_KEY still fetches — the backend-only path is unchanged', async () => {
+  const { chat } = loadLlmWith({ CHAT_BRIDGE_TOKEN: undefined, OPENAI_API_KEY: 'sk-real' });
+  const stub = recordingFetch(async () => new Response(okBody, { status: 200 }));
+  try {
+    assert.equal(await chat([{ role: 'user', content: 'hi' }]), 'ok');
+    assert.equal(stub.calls.length, 1);
+  } finally {
+    stub.restore();
+  }
+});
+
+test('a refused credential is permanent, so the transport acks instead of nacking', async () => {
+  const { chat } = loadLlmWith({ CHAT_BRIDGE_TOKEN: 'stale', OPENAI_API_KEY: undefined });
+  const stub = recordingFetch(async () => new Response('unauthorized', { status: 401 }));
+  try {
+    await assert.rejects(
+      () => chat([{ role: 'user', content: 'hi' }]),
+      (e) => e.permanent === true && /endpoint 401/.test(e.message),
+    );
+  } finally {
+    stub.restore();
+  }
+});
+
+test('a transient failure stays retryable — only auth is permanent', async () => {
+  const { chat } = loadLlmWith({ CHAT_BRIDGE_TOKEN: 'good', OPENAI_API_KEY: undefined });
+  const stub = recordingFetch(async () => new Response('boom', { status: 503 }));
+  try {
+    await assert.rejects(
+      () => chat([{ role: 'user', content: 'hi' }]),
+      (e) => e.permanent === undefined && /endpoint 503/.test(e.message),
+    );
+  } finally {
+    stub.restore();
+  }
+});
+
+delete process.env.CHAT_BRIDGE_TOKEN;
+delete process.env.OPENAI_API_KEY;

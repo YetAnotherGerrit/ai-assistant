@@ -19,6 +19,36 @@ function controlAuth() {
 }
 
 /**
+ * Does this deployment hold a real credential?
+ *
+ * `config.apiKey` defaults to the literal `not-needed`, which is the sentinel
+ * for "no key configured at all" — it exists so a local run against a shim that
+ * does not check can proceed. That sentinel is NOT a credential, and sending it
+ * earns a refusal the caller then retries. So there are exactly two real ones:
+ * a configured CHAT_BRIDGE_TOKEN (the Claude Code shim) or a real
+ * OPENAI_API_KEY (an OpenAI-compatible backend such as MiniMax).
+ */
+function hasCredential() {
+  return Boolean(config.chatBridgeToken) || config.apiKey !== 'not-needed';
+}
+
+/**
+ * An error retrying cannot fix.
+ *
+ * The transports nack on failure so Pub/Sub redelivers — right for a transient
+ * outage, wrong for a misconfiguration: a missing credential, or one the shim
+ * refuses, reproduces identically on every redelivery, so the bot fetches in a
+ * loop for as long as the message lives (observed 2026-10-02: ~2 turns/s for
+ * minutes, with the shim logging a refusal per attempt). `permanent` is how a
+ * transport tells the two apart and acks instead of nacking.
+ */
+function permanentError(message) {
+  const err = new Error(message);
+  err.permanent = true;
+  return err;
+}
+
+/**
  * Minimal OpenAI chat-completions client.
  *
  * Deliberately assumes NOTHING about server statefulness: it sends the full
@@ -32,6 +62,16 @@ function controlAuth() {
  * two threads run concurrently instead of queueing behind one another.
  */
 async function chat(messages, { sessionKey, signal } = {}) {
+  // Refuse BEFORE fetching. With no credential there is nothing to
+  // authenticate with, so the request can only ever be refused — and every
+  // refusal nacks, which redelivers, which refuses again.
+  if (!hasCredential()) {
+    throw permanentError(
+      'no credential configured — set CHAT_BRIDGE_TOKEN (Claude Code shim) or ' +
+        'OPENAI_API_KEY (OpenAI-compatible backend); refusing to fetch',
+    );
+  }
+
   const res = await fetch(`${config.baseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
@@ -49,7 +89,11 @@ async function chat(messages, { sessionKey, signal } = {}) {
 
   if (!res.ok) {
     const body = await res.text().catch(() => '');
-    throw new Error(`endpoint ${res.status}: ${body.slice(0, 200)}`);
+    const message = `endpoint ${res.status}: ${body.slice(0, 200)}`;
+    // 401/403 is the shim refusing the credential, not a hiccup — the identical
+    // request is refused identically on every redelivery, so retrying only
+    // rebuilds the loop. Anything else may be transient and still retries.
+    throw res.status === 401 || res.status === 403 ? permanentError(message) : new Error(message);
   }
 
   const data = await res.json();
@@ -556,6 +600,7 @@ function textKeyFor(prefix, id) {
 
 module.exports = {
   chat,
+  hasCredential,
   converse,
   conversationKey,
   markTypedTurn,

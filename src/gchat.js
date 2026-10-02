@@ -386,7 +386,21 @@ function startGchat() {
       });
       message.ack();
     } catch (e) {
-      log.error('gchat turn failed', { error: e.message });
+      log.error('gchat turn failed', { error: e.message, permanent: Boolean(e.permanent) });
+      if (e.permanent) {
+        // Retrying cannot fix a misconfiguration, so redelivering only rebuilds
+        // the loop. Ack and say so in-thread rather than going silent. The
+        // notice is best-effort — a failed one must not resurrect the nack.
+        await postChatReply({
+          spaceName: event.spaceName,
+          threadName: event.threadName,
+          text: 'Sorry, the Data Assistant is misconfigured and cannot answer right now.',
+        }).catch((noticeError) =>
+          log.error('gchat error notice failed', { error: noticeError.message }),
+        );
+        message.ack();
+        return;
+      }
       message.nack();
     }
   });
