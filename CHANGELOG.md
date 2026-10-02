@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 - MINOR version when you add functionality in a backwards-compatible manner, and
 - PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.54.0
 
 - feat: read the Google Chat thread between mentions. Before answering, the transport fetches the thread via `spaces.messages.list` (paginated, capped at 50, keeping the most recent window) and passes it to `converse()` as `history` — the seam that already existed for this. The bot's own messages map to the `assistant` role so the model can tell its earlier answer from a requester's follow-up, textless messages (attachments, cards) are dropped, and the window starts at the bot's own last reply because the session already remembers everything before it. A failed read is logged and the turn still answers, with less context than it wanted. Note the permission split: posting a reply uses `chat.bot`, but `spaces.messages.list` rejects that scope (`ACCESS_TOKEN_SCOPE_INSUFFICIENT`, verified against the live API), so reading a thread needs `chat.app.messages.readonly` — which a Google Workspace administrator must grant once, and which returns only public messages. Until that grant lands the read fails and the log carries `fetched 0 messages`.
 
