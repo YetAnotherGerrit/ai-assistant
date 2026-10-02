@@ -508,6 +508,26 @@ function voiceKeyFor(guildId) {
 }
 
 /**
+ * The key scheme, in one place: `<namespace>:<id>`, with the process identity
+ * appended when `IDENTITY` is set.
+ *
+ * A transport does not build this string. It resolves the namespace and the id
+ * from its own channel context and asks for the key, so a new channel adds no
+ * keying code, and whether two channels' keyspaces stay disjoint is decided
+ * here rather than re-derived per adapter.
+ *
+ * `alwaysIdentity` keeps the trailing segment when `IDENTITY` is unset. Google
+ * Chat needs it: its key is defined as exactly three colon segments so the
+ * shim's `identity_for()` — which reads the last segment — cannot mistake the
+ * space/thread id for the identity, which a two-segment `gchat:<id>` would make
+ * it do.
+ */
+function conversationKey(namespace, id, { alwaysIdentity = false } = {}) {
+  if (config.identity) return `${namespace}:${id}:${config.identity}`;
+  return alwaysIdentity ? `${namespace}:${id}:` : `${namespace}:${id}`;
+}
+
+/**
  * The conversation a text turn on `prefix:<id>` belongs to.
  *
  * A header was tried here first and dropped: multiple Discord identities can
@@ -530,26 +550,6 @@ function voiceKeyFor(guildId) {
  * whatever the 2-segment key already held. That is intended, not a bug —
  * see `identity_for()` in the shim.
  */
-/**
- * The key scheme, in one place: `<namespace>:<id>`, with the process identity
- * appended when `IDENTITY` is set.
- *
- * A transport does not build this string. It resolves the namespace and the id
- * from its own channel context and asks for the key, so a new channel adds no
- * keying code, and whether two channels' keyspaces stay disjoint is decided
- * here rather than re-derived per adapter.
- *
- * `alwaysIdentity` keeps the trailing segment when `IDENTITY` is unset. Google
- * Chat needs it: its key is defined as exactly three colon segments so the
- * shim's `identity_for()` — which reads the last segment — cannot mistake the
- * space/thread id for the identity, which a two-segment `gchat:<id>` would make
- * it do.
- */
-function conversationKey(namespace, id, { alwaysIdentity = false } = {}) {
-  if (config.identity) return `${namespace}:${id}:${config.identity}`;
-  return alwaysIdentity ? `${namespace}:${id}:` : `${namespace}:${id}`;
-}
-
 function textKeyFor(prefix, id) {
   return conversationKey(prefix, id);
 }
