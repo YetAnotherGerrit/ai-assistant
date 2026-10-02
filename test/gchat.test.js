@@ -71,3 +71,47 @@ test('classify: non-empty is shape, empty is ask-requester', () => {
   assert.equal(classify(''), 'ask-requester');
   assert.equal(classify('   '), 'ask-requester');
 });
+
+// The sender gate. A Chat turn runs Claude Code in a clone of the Data
+// Assistant vault, so anyone who can mention the app can read from it — the
+// allowlist is what holds that to the named people. Every case below reloads
+// BOTH modules: gchat captures `config` at load, so re-requiring config alone
+// would leave the predicate reading a stale list.
+function loadGchat(emails) {
+  if (emails === undefined) delete process.env.GCHAT_ALLOWED_EMAILS;
+  else process.env.GCHAT_ALLOWED_EMAILS = emails;
+  delete require.cache[require.resolve('../src/config')];
+  delete require.cache[require.resolve('../src/gchat')];
+  return require('../src/gchat');
+}
+
+test('isAllowedSender refuses everyone when GCHAT_ALLOWED_EMAILS is unset', () => {
+  assert.equal(loadGchat(undefined).isAllowedSender('alice@seibert.group'), false);
+});
+
+test('isAllowedSender refuses everyone when GCHAT_ALLOWED_EMAILS is empty', () => {
+  assert.equal(loadGchat('').isAllowedSender('alice@seibert.group'), false);
+});
+
+test('isAllowedSender admits a listed address and refuses an unlisted one', () => {
+  const gchat = loadGchat('alice@seibert.group, bob@seibert.group');
+  assert.ok(gchat.isAllowedSender('alice@seibert.group'));
+  assert.ok(gchat.isAllowedSender('bob@seibert.group'));
+  assert.equal(gchat.isAllowedSender('mallory@example.com'), false);
+});
+
+// Google reports the address in the account's own casing, so a byte compare
+// would refuse the very people on the list. Both directions are checked: the
+// casing can arrive on either side.
+test('isAllowedSender ignores case on both the sender and the list entry', () => {
+  assert.ok(loadGchat('alice@seibert.group').isAllowedSender('Alice@Seibert.Group'));
+  assert.ok(loadGchat('Alice@Seibert.Group').isAllowedSender('alice@seibert.group'));
+});
+
+test('isAllowedSender refuses a message that carries no sender address', () => {
+  const gchat = loadGchat('alice@seibert.group');
+  assert.equal(gchat.isAllowedSender(''), false);
+  assert.equal(gchat.isAllowedSender(undefined), false);
+});
+
+delete process.env.GCHAT_ALLOWED_EMAILS;
