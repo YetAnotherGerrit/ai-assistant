@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 - MINOR version when you add functionality in a backwards-compatible manner, and
 - PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.56.0
 
 - feat: log one line per tool call in the shim, so "the assistant reached OpenBrain" can be proven from the log instead of inferred from the answer. The shim logged no tool calls at any level — every line is an unconditional `print()`, the only per-turn line is `{secs}s, {chars} chars`, and no `LOG_LEVEL` adds anything — so a live turn could return a good answer and still leave its tool access unproven, which is what blocked the second criterion of the Data Assistant reach map. The `tool_use` content block was already detected in the stream loop, where it arms the hold timer, so the line is emitted beside that detection and names both the tool and the turn's session key: `tool_call [<key>] mcp__openbrain__search_related`. A turn that uses no tool prints nothing. Tool arguments and results are deliberately not logged. It writes with `print(..., flush=True)` rather than `logging` — a deliberate deviation from the Python logging guide, because stdout is this process's log surface and a lone `logging` call in a print-based file would be the inconsistent seam.
 
