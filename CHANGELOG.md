@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 - MINOR version when you add functionality in a backwards-compatible manner, and
 - PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.53.1
 
 - refactor: extract the conversation core behind the transport seam. `src/llm.js` gains `converse()` — assemble the prompt, call the model, return the reply — and `conversationKey()`, the one place a session-key string is built; `textKeyFor` and `voiceKeyFor` now delegate to it. `src/text.js` and `src/gchat.js` no longer call the model or build a session key: each resolves its own namespace and id from its channel context and asks the core. Google Chat keeps its three-segment key via `alwaysIdentity`. No behaviour change — same keys byte for byte, same prompts, same `X-Session-Key`/`X-Output-Mode` headers.
 - docs: add `docs/conversation-seam.md`, naming the transport/conversation seam — what the conversation core owns (the keying scheme, history assembly, the model call, the reply) and what a transport owns (receiving an event, resolving a conversation key, supplying the history it can read, sending a reply), plus the behaviours the extraction must preserve.
