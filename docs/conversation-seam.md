@@ -28,8 +28,8 @@ Chat) owns only its channel:
 - **receiving an event** — a gateway message, a Pub/Sub envelope, an interaction
 - **resolving a conversation key** — choosing the namespace and id from its own channel
   context, using the core's scheme
-- **supplying the history it can read** — a Discord channel's messages, a Chat thread's
-  messages, or nothing at all
+- **supplying the history it can read** — a Discord channel's messages, or nothing at
+  all
 - **sending a reply** — chunking, threading, in-thread posting, and any channel-specific
   behaviour such as routing a typed turn in a live call to `speak()`
 
@@ -45,7 +45,7 @@ async function converse({ sessionKey, history = [], text, signal }) -> string
 
 - `sessionKey` — resolved by the transport, from its own channel context
 - `history` — prior turns the transport could read from its channel; `[]` when it can
-  read none (Google Chat sends none today)
+  read none (Google Chat supplies none)
 - `text` — the inbound message
 - returns the reply text, which the transport sends
 
