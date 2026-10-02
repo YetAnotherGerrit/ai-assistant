@@ -59,6 +59,33 @@ async function chat(messages, { sessionKey, signal } = {}) {
 }
 
 /**
+ * One conversation turn: assemble the prompt, ask the model, return the reply.
+ *
+ * This is the seam. A transport receives an event, resolves its conversation
+ * key from its own channel context, supplies whatever history it could read
+ * from that channel plus the inbound text — and gets back the answer to send.
+ * It never touches the model endpoint, the shape of a session key, or the
+ * ordering of the prompt.
+ *
+ * `system` is the transport's own channel directive, when it has one: Google
+ * Chat tells the assistant to answer plainly, Discord supplies none and relies
+ * on the shim's default.
+ *
+ * `history` may already end with the inbound message — a transport that reads
+ * history back from the channel will have fetched it there. The duplicate is
+ * dropped rather than sent twice, which is what the Discord path relied on
+ * before this function existed.
+ */
+async function converse({ sessionKey, history = [], text, system, signal }) {
+  const messages = system ? [{ role: 'system', content: system }] : [];
+  messages.push(...history);
+  if (text != null && messages.at(-1)?.content !== text) {
+    messages.push({ role: 'user', content: text });
+  }
+  return chat(messages, { sessionKey, signal });
+}
+
+/**
  * Tell the endpoint that the next turn on this key came from the KEYBOARD.
  *
  * A typed turn reaches the endpoint through speech-to-speech looking exactly
@@ -477,7 +504,7 @@ function sessionKeyFor(channel, userId) {
  */
 function voiceKeyFor(guildId) {
   if (!guildId) return DEFAULT_SESSION_KEY;
-  return config.identity ? `voice:${guildId}:${config.identity}` : `voice:${guildId}`;
+  return conversationKey('voice', guildId);
 }
 
 /**
@@ -503,12 +530,34 @@ function voiceKeyFor(guildId) {
  * whatever the 2-segment key already held. That is intended, not a bug —
  * see `identity_for()` in the shim.
  */
+/**
+ * The key scheme, in one place: `<namespace>:<id>`, with the process identity
+ * appended when `IDENTITY` is set.
+ *
+ * A transport does not build this string. It resolves the namespace and the id
+ * from its own channel context and asks for the key, so a new channel adds no
+ * keying code, and whether two channels' keyspaces stay disjoint is decided
+ * here rather than re-derived per adapter.
+ *
+ * `alwaysIdentity` keeps the trailing segment when `IDENTITY` is unset. Google
+ * Chat needs it: its key is defined as exactly three colon segments so the
+ * shim's `identity_for()` — which reads the last segment — cannot mistake the
+ * space/thread id for the identity, which a two-segment `gchat:<id>` would make
+ * it do.
+ */
+function conversationKey(namespace, id, { alwaysIdentity = false } = {}) {
+  if (config.identity) return `${namespace}:${id}:${config.identity}`;
+  return alwaysIdentity ? `${namespace}:${id}:` : `${namespace}:${id}`;
+}
+
 function textKeyFor(prefix, id) {
-  return config.identity ? `${prefix}:${id}:${config.identity}` : `${prefix}:${id}`;
+  return conversationKey(prefix, id);
 }
 
 module.exports = {
   chat,
+  converse,
+  conversationKey,
   markTypedTurn,
   resetSession,
   listSessions,
