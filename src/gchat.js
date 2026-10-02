@@ -2,7 +2,7 @@
 
 const config = require('./config');
 const log = require('./log');
-const { chat } = require('./llm');
+const { conversationKey, converse } = require('./llm');
 
 /**
  * Google Chat transport — the OPTIONAL second surface of the assistant.
@@ -73,11 +73,13 @@ function parseEvent(payload) {
  * two surfaces cannot collide on a session (goal SC2).
  */
 function gchatSessionKey(spaceName, threadName) {
-  const identity = config.identity;
   const spaceId = String(spaceName).replace(/\/+$/, '').split('/').pop() || '';
   let threadId = 'space';
   if (threadName) threadId = String(threadName).replace(/\/+$/, '').split('/').pop() || 'space';
-  return `gchat:${spaceId}_${threadId}:${identity}`;
+  // Only the namespace and id are this transport's business; the core builds the
+  // string. `alwaysIdentity` is what keeps the trailing segment even with no
+  // IDENTITY set — see `conversationKey`.
+  return conversationKey('gchat', `${spaceId}_${threadId}`, { alwaysIdentity: true });
 }
 
 /**
@@ -180,7 +182,7 @@ function startGchat() {
       return;
     }
     const key = gchatSessionKey(event.spaceName, event.threadName);
-    // The gate runs BEFORE chat(): a turn reaches a Claude Code session with
+    // The gate runs BEFORE converse(): a turn reaches a Claude Code session with
     // vault and repo access, so a sender who is not on the list must not get
     // one. `refused` is its own verdict rather than a classify() result, so the
     // log line tells a gated sender apart from an ordinary turn.
@@ -203,13 +205,11 @@ function startGchat() {
         message.ack();
         return;
       }
-      const answer = await chat(
-        [
-          { role: 'system', content: SYSTEM_DIRECTIVE },
-          { role: 'user', content: event.argumentText },
-        ],
-        { sessionKey: key },
-      );
+      const answer = await converse({
+        sessionKey: key,
+        text: event.argumentText,
+        system: SYSTEM_DIRECTIVE,
+      });
       await postChatReply({
         spaceName: event.spaceName,
         threadName: event.threadName,

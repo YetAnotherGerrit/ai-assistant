@@ -8,6 +8,11 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 - MINOR version when you add functionality in a backwards-compatible manner, and
 - PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- refactor: extract the conversation core behind the transport seam. `src/llm.js` gains `converse()` — assemble the prompt, call the model, return the reply — and `conversationKey()`, the one place a session-key string is built; `textKeyFor` and `voiceKeyFor` now delegate to it. `src/text.js` and `src/gchat.js` no longer call the model or build a session key: each resolves its own namespace and id from its channel context and asks the core. Google Chat keeps its three-segment key via `alwaysIdentity`. No behaviour change — same keys byte for byte, same prompts, same `X-Session-Key`/`X-Output-Mode` headers.
+- docs: add `docs/conversation-seam.md`, naming the transport/conversation seam — what the conversation core owns (the keying scheme, history assembly, the model call, the reply) and what a transport owns (receiving an event, resolving a conversation key, supplying the history it can read, sending a reply), plus the behaviours the extraction must preserve.
+
 ## v0.53.0
 
 - feat: gate the Google Chat transport on a sender allowlist. `GCHAT_ALLOWED_EMAILS` (comma-separated, matched case-insensitively) names the addresses that may drive the Chat surface; a message from anyone else gets a short refusal in-thread and never reaches the session engine, which runs Claude Code in a clone of the Data Assistant vault. The per-message log line carries `verdict: refused` for a gated sender, so a refusal is distinguishable from an ordinary turn. The list is deliberately separate from `ALLOWED_USER_IDS`, which holds Discord user IDs and keeps gating the Discord surface — a snowflake can never match a Google address, so the `config.js` comment claiming one list covered both surfaces was wrong and is corrected. Fails closed: an unset or empty list admits nobody, and `config.check()` reports the empty list as a problem while `GCHAT_ENABLED=1`.

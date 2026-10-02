@@ -2,7 +2,7 @@
 
 const config = require('./config');
 const log = require('./log');
-const { chat, sessionKeyFor } = require('./llm');
+const { converse, sessionKeyFor } = require('./llm');
 const voice = require('./voice');
 const { chunk, DISCORD_LIMIT } = require('./discord-chunk');
 const { VOICE_DISABLED_REPLY } = require('./slash-commands');
@@ -316,10 +316,10 @@ function register(client) {
       const typing = setInterval(() => target.sendTyping().catch(() => {}), 8000);
 
       // Read history from the thread, not the parent channel — that is the
-      // point of threading. A brand-new thread has none, so fall back to the
-      // message itself.
+      // point of threading. A brand-new thread has none; the core appends the
+      // inbound message either way, and drops the duplicate when the fetch
+      // already returned it.
       const messages = await history(target, client.user.id).catch(() => []);
-      if (messages.at(-1)?.content !== content) messages.push({ role: 'user', content });
 
       // Key the conversation to the thread/DM/channel so separate threads get
       // separate sessions and can run at the same time.
@@ -327,7 +327,7 @@ function register(client) {
 
       let answer;
       try {
-        answer = await chat(messages, { sessionKey });
+        answer = await converse({ sessionKey, history: messages, text: content });
       } finally {
         clearInterval(typing);
       }

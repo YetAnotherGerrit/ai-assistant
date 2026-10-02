@@ -625,3 +625,99 @@ test('getVoiceState distinguishes unsupported from broken', async () => {
     global.fetch = realFetch;
   }
 });
+
+// ── the conversation core's own seam ────────────────────────────────────────
+// `conversationKey` is the one place a session-key string is built, and
+// `converse` is what every transport now calls instead of touching the model.
+// The delegating callers (sessionKeyFor / voiceKeyFor) are covered above; these
+// exercise the seam itself, which is what a new adapter depends on.
+
+test('conversationKey omits the identity segment when IDENTITY is unset', () => {
+  delete process.env.IDENTITY;
+  delete require.cache[require.resolve('../src/config')];
+  delete require.cache[require.resolve('../src/llm')];
+  const { conversationKey } = require('../src/llm');
+  assert.equal(conversationKey('thread', 'T1'), 'thread:T1');
+});
+
+test('conversationKey appends the identity when IDENTITY is set', () => {
+  process.env.IDENTITY = 'sc';
+  delete require.cache[require.resolve('../src/config')];
+  delete require.cache[require.resolve('../src/llm')];
+  const { conversationKey } = require('../src/llm');
+  assert.equal(conversationKey('thread', 'T1'), 'thread:T1:sc');
+  delete process.env.IDENTITY;
+  delete require.cache[require.resolve('../src/config')];
+  delete require.cache[require.resolve('../src/llm')];
+});
+
+test('alwaysIdentity keeps the trailing segment with IDENTITY unset — the Google Chat shape', () => {
+  // Load-bearing, not cosmetic: `identity_for()` in the shim reads the LAST
+  // colon segment, so a two-segment `gchat:<id>` would hand it the space/thread
+  // id as the identity. Google Chat's key is defined as exactly three segments.
+  delete process.env.IDENTITY;
+  delete require.cache[require.resolve('../src/config')];
+  delete require.cache[require.resolve('../src/llm')];
+  const { conversationKey } = require('../src/llm');
+  assert.equal(conversationKey('gchat', 'AAA_BBB', { alwaysIdentity: true }), 'gchat:AAA_BBB:');
+  assert.equal(conversationKey('gchat', 'AAA_BBB'), 'gchat:AAA_BBB');
+});
+
+/** Stub the model endpoint and hand back the body it was sent. */
+async function converseWith(args) {
+  const realFetch = globalThis.fetch;
+  let sent;
+  try {
+    globalThis.fetch = async (_url, opts) => {
+      sent = JSON.parse(opts.body);
+      return { ok: true, json: async () => ({ choices: [{ message: { content: 'ok' } }] }) };
+    };
+    const { converse } = require('../src/llm');
+    const reply = await converse(args);
+    return { reply, messages: sent.messages };
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
+test('converse does not send the inbound message twice when history ends with it', async () => {
+  // The Discord path reads history back from the channel, so the inbound
+  // message is usually already the last entry — the guard is what stops the
+  // turn being sent twice.
+  const { messages } = await converseWith({
+    sessionKey: 'thread:T1',
+    history: [{ role: 'user', content: 'hello' }],
+    text: 'hello',
+  });
+  assert.deepEqual(messages, [{ role: 'user', content: 'hello' }]);
+});
+
+test('converse appends the inbound message when history does not carry it', async () => {
+  const { messages } = await converseWith({
+    sessionKey: 'thread:T1',
+    history: [{ role: 'assistant', content: 'earlier' }],
+    text: 'hello',
+  });
+  assert.deepEqual(messages, [
+    { role: 'assistant', content: 'earlier' },
+    { role: 'user', content: 'hello' },
+  ]);
+});
+
+test('converse puts the transport system directive first, and returns the reply', async () => {
+  // Google Chat supplies a channel directive; Discord supplies none and relies
+  // on the shim's default, so the system turn must be optional.
+  const withSystem = await converseWith({
+    sessionKey: 'gchat:AAA_BBB:',
+    text: 'hi',
+    system: 'answer plainly',
+  });
+  assert.deepEqual(withSystem.messages, [
+    { role: 'system', content: 'answer plainly' },
+    { role: 'user', content: 'hi' },
+  ]);
+  assert.equal(withSystem.reply, 'ok');
+
+  const without = await converseWith({ sessionKey: 'thread:T1', text: 'hi' });
+  assert.deepEqual(without.messages, [{ role: 'user', content: 'hi' }]);
+});
