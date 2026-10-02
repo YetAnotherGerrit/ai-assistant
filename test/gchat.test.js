@@ -9,7 +9,14 @@ const assert = require('node:assert');
 process.env.IDENTITY = 'data';
 delete require.cache[require.resolve('../src/config')];
 delete require.cache[require.resolve('../src/gchat')];
-const { parseEvent, gchatSessionKey, classify, clearPlaceholder } = require('../src/gchat');
+const {
+  parseEvent,
+  gchatSessionKey,
+  classify,
+  turnStatus,
+  setPlaceholder,
+  clearPlaceholder,
+} = require('../src/gchat');
 
 const CHAT_EVENT = {
   commonEventObject: { hostApp: 'CHAT', platform: 'WEB' },
@@ -117,10 +124,60 @@ test('isAllowedSender refuses a message that carries no sender address', () => {
 delete process.env.GCHAT_ALLOWED_EMAILS;
 
 // The turn placeholder. It answers the mention immediately, so a multi-minute
-// turn never looks dead, and is removed once the turn ends — so every turn
-// leaves exactly one message behind: the answer, or the failure notice. The
-// delete is best-effort: the answer is already posted by the time it runs, so a
-// failed delete must never turn a delivered answer into a failed turn.
+// turn never looks dead, then closes out as a one-line status carrying the
+// elapsed time. Both helpers are best-effort: the answer is already posted by
+// the time they run, so a failed edit or delete must never turn a delivered
+// answer into a failed turn.
+test('turnStatus reports the elapsed time of a generated answer', () => {
+  assert.equal(turnStatus({ ms: 120000 }), 'Answer was generated in 120s');
+  assert.equal(turnStatus({ ms: 3800 }), 'Answer was generated in 4s');
+});
+
+test('turnStatus reports a failed turn', () => {
+  assert.equal(turnStatus({ ms: 12000, failed: true }), 'Turn failed after 12s');
+});
+
+// "generated in 0s" reads as a bug rather than as "fast".
+test('turnStatus floors at one second', () => {
+  assert.equal(turnStatus({ ms: 200 }), 'Answer was generated in 1s');
+  assert.equal(turnStatus({ ms: 0 }), 'Answer was generated in 1s');
+});
+
+test('setPlaceholder edits the placeholder to the status', async () => {
+  const calls = [];
+  const patch = async (args) => {
+    calls.push(args);
+  };
+  await setPlaceholder({ name: 'spaces/AAA/messages/1' }, 'Answer was generated in 12s', patch);
+
+  assert.deepEqual(calls, [
+    { messageName: 'spaces/AAA/messages/1', text: 'Answer was generated in 12s' },
+  ]);
+});
+
+test('setPlaceholder is a no-op when the turn never got a placeholder', async () => {
+  const calls = [];
+  const patch = async (args) => {
+    calls.push(args);
+  };
+  await setPlaceholder(null, 'x', patch);
+  await setPlaceholder(undefined, 'x', patch);
+  await setPlaceholder({}, 'x', patch);
+
+  assert.deepEqual(calls, [], 'nothing to edit — no call, and no error either');
+});
+
+test('setPlaceholder swallows a failed edit', async () => {
+  await assert.doesNotReject(
+    setPlaceholder({ name: 'spaces/AAA/messages/1' }, 'x', async () => {
+      throw new Error('chat api 500');
+    }),
+    'a delivered answer must survive a failed status edit',
+  );
+});
+
+// clearPlaceholder is the transient-failure path only: the turn is not over, so
+// the placeholder goes rather than sitting beside the retry's own.
 test('clearPlaceholder deletes the placeholder', async () => {
   const calls = [];
   await clearPlaceholder({ name: 'spaces/AAA/messages/1' }, async (args) => {
