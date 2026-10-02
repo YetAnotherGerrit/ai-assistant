@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 - MINOR version when you add functionality in a backwards-compatible manner, and
 - PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- refactor: remove the Google Chat thread read. Reading what was said between mentions needs `chat.app.messages.readonly`, a scope a Google Workspace administrator must grant; `chat.bot` cannot list messages (`ACCESS_TOKEN_SCOPE_INSUFFICIENT`), so until that grant landed every turn minted a token, took a 403 from `spaces.messages.list` and logged a warn for no benefit. The read, its scope, its helpers (`readThreadHistory`, `fetchThreadMessages`, `collectThreadMessages`, `threadHistory`, `threadWindow`, `messagesToHistory`) and their tests are gone, and the bot answers from the mention alone — the session already remembers the rest of the conversation. The read never reaches the model, so the turn behaviour is unchanged; what goes away is the per-turn 403 and its warn.
+
 ## v0.54.2
 
 - fix: never fetch a turn without a credential, and stop retrying one the shim refuses. `controlAuth()` falls back to `config.apiKey`, which defaults to the literal sentinel `not-needed` — so a deployment with neither `CHAT_BRIDGE_TOKEN` nor a real `OPENAI_API_KEY` sent `Bearer not-needed` on every turn, the shim's mutating-route guard refused it (401/400), and the Google Chat handler nacked, which redelivers, which refuses again: ~2 turns/s until the message died (observed 2026-10-02, with the shim logging a refusal per attempt). `chat()` now throws before fetching when `hasCredential()` is false, and a 401/403 is marked `permanent` so the Chat transport acks and posts a short in-thread notice instead of rebuilding the loop. A real `OPENAI_API_KEY` still fetches, so the OpenAI-compatible backend path is unchanged.
